@@ -121,6 +121,18 @@ elif [ "$COMP_TYPE" == "7z" ]; then
     ARCHIVE="$OUTPUT_BASE.7z"
     7z a -t7z -m0=lzma2 -mx=9 -mfb=256 -md=1536m -ms=on "$ARCHIVE" .
 
+elif [ "$COMP_TYPE" == "tar" ]; then
+    ARCHIVE="$OUTPUT_BASE.tar"
+    tar -cf "$ARCHIVE" .
+
+elif [ "$COMP_TYPE" == "gzip" ]; then
+    ARCHIVE="$OUTPUT_BASE.gz"
+    tar -cf - . | gzip > "$ARCHIVE"
+
+elif [ "$COMP_TYPE" == "gz" ]; then
+    ARCHIVE="$OUTPUT_BASE.gz"
+    gzip -r .
+
 else
     ARCHIVE="$OUTPUT_BASE.zip"
     zip -r "$ARCHIVE" .
