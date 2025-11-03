@@ -30,12 +30,18 @@ function install_backuper() {
     echo "1) zip"
     echo "2) tgz"
     echo "3) 7z"
+    echo "4) tar"
+    echo "5) gzip"
+    echo "6) gz"
     read -p "Choose (1-5): " COMP_TYPE_OPT
 
     case $COMP_TYPE_OPT in
        1) COMP_TYPE="zip" ;;
        2) COMP_TYPE="tgz" ;;
        3) COMP_TYPE="7z" ;;
+       4) COMP_TYPE="tar" ;;
+       5) COMP_TYPE="gzip" ;;
+       6) COMP_TYPE="gz" ;;
         *) echo "Invalid choice. Default: zip"; COMP_TYPE="zip" ;;
     esac
 
