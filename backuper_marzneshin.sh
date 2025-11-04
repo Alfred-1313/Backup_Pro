@@ -1,7 +1,6 @@
 #!/bin/bash
-
 # =========================================
-#        Backuper Marzneshin Menu
+# Backuper Marzneshin Menu - Final Version
 # =========================================
 
 # ----- Install Required Packages -----
@@ -9,13 +8,9 @@ function install_requirements() {
     clear
     echo "Installing required packages..."
     apt update -y && apt upgrade -y
-    apt install zip unzip -y
-    apt install tar gzip -y
-    apt install p7zip-full -y
-    apt install mariadb-client -y
-    apt install sshpass -y
-    apt install xz-utils zstd -y
+    apt install zip unzip tar gzip p7zip-full mariadb-client sshpass xz-utils zstd -y
 }
+
 # ----- Detect Database Type -----
 function detect_db_type() {
     local docker_file="/etc/opt/marzneshin/docker-compose.yml"
@@ -43,9 +38,142 @@ function detect_db_type() {
     fi
 }
 
+# ----- Create Backup Script Based on DB Type -----
+function create_backup_script() {
+    local db_type="$1"
+    local script_file="/root/marz_backup.sh"
+    local backup_dir="/root/backuper_marzneshin"
+
+    cat > "$script_file" <<'EOF'
+#!/bin/bash
+BACKUP_DIR="/root/backuper_marzneshin"
+BOT_TOKEN="__BOT_TOKEN__"
+CHAT_ID="__CHAT_ID__"
+CAPTION="__CAPTION__"
+COMP_TYPE="__COMP_TYPE__"
+DATE=$(date +"%Y-%m-%d_%H-%M-%S")
+OUTPUT_BASE="$BACKUP_DIR/backup_$DATE"
+ARCHIVE=""
+mkdir -p "$BACKUP_DIR"
+cd "$BACKUP_DIR" || exit 1
+
+# Clean previous content
+rm -rf etc_opt var_lib_marznode var_lib_marzneshin marzneshin_backup.sql
+
+# Copy paths
+mkdir -p etc_opt var_lib_marznode var_lib_marzneshin
+cp -r /etc/opt/marzneshin/ etc_opt/ 2>/dev/null || true
+cp -r /var/lib/marznode/ var_lib_marznode/ 2>/dev/null || true
+rsync -a --exclude='mysql' /var/lib/marzneshin/ var_lib_marzneshin/ 2>/dev/null || true
+
+# ==============================
+# Database Backup Section
+# ==============================
+DB_BACKUP_DONE=0
+DOCKER_COMPOSE="/etc/opt/marzneshin/docker-compose.yml"
+if [ -f "$DOCKER_COMPOSE" ]; then
+EOF
+
+    if [[ "$db_type" == "sqlite" ]]; then
+        cat >> "$script_file" <<'EOF'
+    # SQLite: No external dump needed
+    echo "SQLite detected. DB files included in /var/lib/marzneshin/"
+    DB_BACKUP_DONE=1
+EOF
+    elif [[ "$db_type" == "mysql" ]]; then
+        cat >> "$script_file" <<'EOF'
+    DB_PASS=$(grep 'MYSQL_ROOT_PASSWORD:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
+    DB_NAME=$(grep 'MYSQL_DATABASE:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
+    DB_USER="root"
+    if [ -n "$DB_PASS" ] && [ -n "$DB_NAME" ]; then
+        echo "Backing up MySQL database..."
+        mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$BACKUP_DIR/marzneshin_backup.sql" 2>/dev/null && DB_BACKUP_DONE=1
+        [ $DB_BACKUP_DONE -eq 1 ] && echo "MySQL backup completed." || echo "MySQL backup failed."
+    else
+        echo "MySQL credentials not found."
+    fi
+EOF
+    elif [[ "$db_type" == "mariadb" ]]; then
+        cat >> "$script_file" <<'EOF'
+    DB_PASS=$(grep 'MARIADB_ROOT_PASSWORD:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
+    DB_NAME=$(grep 'MARIADB_DATABASE:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
+    DB_USER="root"
+    if [ -n "$DB_PASS" ] && [ -n "$DB_NAME" ]; then
+        echo "Backing up MariaDB database..."
+        mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$BACKUP_DIR/marzneshin_backup.sql" 2>/dev/null && DB_BACKUP_DONE=1
+        [ $DB_BACKUP_DONE -eq 1 ] && echo "MariaDB backup completed." || echo "MariaDB backup failed."
+    else
+        echo "MariaDB credentials not found."
+    fi
+EOF
+    fi
+
+    cat >> "$script_file" <<'EOF'
+else
+    echo "docker-compose.yml not found. Skipping DB backup."
+fi
+
+# ==============================
+# Compression Section
+# ==============================
+ARCHIVE="$OUTPUT_BASE"
+if [ "$COMP_TYPE" == "zip" ]; then
+    ARCHIVE="$OUTPUT_BASE.zip"
+    zip -r "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "tgz" ]; then
+    ARCHIVE="$OUTPUT_BASE.tgz"
+    tar -czf "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "7z" ]; then
+    ARCHIVE="$OUTPUT_BASE.7z"
+    7z a -t7z -m0=lzma2 -mx=9 -mfb=256 -md=1536m -ms=on "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "tar" ]; then
+    ARCHIVE="$OUTPUT_BASE.tar"
+    tar -cf "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "gzip" ] || [ "$COMP_TYPE" == "gz" ]; then
+    ARCHIVE="$OUTPUT_BASE.tar.gz"
+    tar -cf - . | gzip > "$ARCHIVE"
+else
+    ARCHIVE="$OUTPUT_BASE.zip"
+    zip -r "$ARCHIVE" . > /dev/null
+fi
+
+# ==============================
+# File size check & Telegram send
+# ==============================
+if [ ! -f "$ARCHIVE" ]; then
+    echo "Backup file not created!"
+    rm -rf "$BACKUP_DIR"/*
+    exit 1
+fi
+
+FILE_SIZE_MB=$(du -m "$ARCHIVE" | cut -f1)
+echo "Backup created: $ARCHIVE ($FILE_SIZE_MB MB)"
+
+# Send to Telegram
+if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+    CAPTION_WITH_SIZE="$CAPTION\nTotal size: ${FILE_SIZE_MB} MB"
+    if [ "$FILE_SIZE_MB" -gt 50 ]; then
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+             -d chat_id="$CHAT_ID" \
+             -d text="Warning: Backup file > 50MB (${FILE_SIZE_MB} MB). Telegram may not accept it." >/dev/null
+    fi
+    curl -s -F chat_id="$CHAT_ID" -F caption="$CAPTION_WITH_SIZE" -F document=@"$ARCHIVE" \
+         "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" >/dev/null && \
+         echo "Backup successfully sent to Telegram!" || echo "Failed to send via Telegram."
+else
+    echo "Telegram credentials missing. Skipping send."
+fi
+
+# Cleanup
+rm -rf "$BACKUP_DIR"/*
+EOF
+
+    chmod +x "$script_file"
+}
+
 # ----- Install Backuper -----
 function install_backuper() {
-while true; do
+    while true; do
         clear
         echo "========================================="
         echo " Select backup type"
@@ -59,11 +187,12 @@ while true; do
         [[ "$PANEL_OPTION" == "1" ]] && { PANEL_TYPE="Marzneshin"; break; }
         echo "Invalid choice. Try again."; sleep 1
     done
-clear
+
+    clear
     echo "Selected Panel: $PANEL_TYPE"
     echo
 
-# Step 1 - Bot Token
+    # Step 1 - Bot Token
     echo "Step 1 - Enter Telegram Bot Token"
     read -p "Token Telegram: " BOT_TOKEN
     [[ -z "$BOT_TOKEN" ]] && { echo "Token cannot be empty."; sleep 1; return; }
@@ -126,27 +255,24 @@ clear
     # Create script based on DB type
     create_backup_script "$DB_TYPE"
 
-    # Replace dynamic variables
-    sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" $BACKUP_SCRIPT
-    sed -i "s|__CHAT_ID__|$CHAT_ID|g" $BACKUP_SCRIPT
-    sed -i "s|__CAPTION__|$CAPTION|g" $BACKUP_SCRIPT
-    sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" $BACKUP_SCRIPT
+    # Replace variables
+    sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" /root/marz_backup.sh
+    sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/marz_backup.sh
+    sed -i "s|__CAPTION__|$CAPTION|g" /root/marz_backup.sh
+    sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/marz_backup.sh
 
-    chmod +x $BACKUP_SCRIPT
+    # Set cron job
+    (crontab -l 2>/dev/null | grep -v "marz_backup.sh"; echo "$CRON_TIME bash /root/marz_backup.sh") | crontab -
 
-    # Set Cron Job
-    (crontab -l 2>/dev/null; echo "$CRON_TIME bash $BACKUP_SCRIPT") | crontab -
+    # Step 7 - Run first backup
+    echo -e "\nStep 7 - Running first backup..."
+    bash /root/marz_backup.sh
 
-    # Send success message
-    curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-        -d chat_id="${CHAT_ID}" \
-        -d text="Successfully installed backuper and backup started." >/dev/null
+    # Success message
+    echo -e "\nBackup successfully sent"
+    curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+         -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
 
-    # Run first backup
-    bash $BACKUP_SCRIPT
-
-    echo
-    echo "Backuper installed successfully and first backup sent."
     read -p "Press Enter to return to menu..."
 }
 
@@ -154,40 +280,35 @@ clear
 function remove_backuper() {
     clear
     echo "Removing Backuper..."
-    rm -f /root/marz_backup.sh
-    rm -f /root/Transfer_backup.sh
-    crontab -l | grep -v 'marz_backup.sh' | crontab -
-    echo "Backup script removed successfully."
-    read -p "Press Enter to return to menu..."
+    rm -f /root/marz_backup.sh /root/Transfer_backup.sh
+    rm -rf /root/backuper_marzneshin
+    crontab -l 2>/dev/null | grep -v 'marz_backup.sh' | crontab -
+    echo "Backuper removed successfully."
+    read -p "Press Enter to return..."
 }
 
 # ----- Run Script Manually -----
 function run_script() {
     clear
-    if [ -f /root/marz_backup.sh ]; then
+    if [[ -f /root/marz_backup.sh ]]; then
         bash /root/marz_backup.sh
     else
-        echo "Backup script not found. Please install it first."
+        echo "Backup script not found. Install first."
     fi
-    read -p "Press Enter to return to menu..."
+    read -p "Press Enter to return..."
 }
 
-# ----- Transfer Backup (Option 4) -----
+# ----- Transfer Backup -----
 function transfer_backup() {
     clear
     echo "========================================="
-    echo "           Transfer Backup"
+    echo " Transfer Backup"
     echo "========================================="
     echo "Select Panel Type:"
     echo "1) Marzneshin [MariaDB]"
     echo "2) Marzban"
     read -p "Choose (1-2): " PANEL_TYPE
-
-    if [ "$PANEL_TYPE" != "1" ]; then
-        echo "Only Marzneshin (option 1) is currently supported."
-        read -p "Press Enter to return..."
-        return
-    fi
+    [[ "$PANEL_TYPE" != "1" ]] && { echo "Only Marzneshin supported."; read -p "Press Enter..."; return; }
 
     clear
     echo "Enter Remote Server Details:"
@@ -196,138 +317,71 @@ function transfer_backup() {
     read -s -p "Password Server [Client]: " REMOTE_PASS
     echo
 
-    # Create Transfer_backup.sh
     TRANSFER_SCRIPT="/root/Transfer_backup.sh"
-    cat > $TRANSFER_SCRIPT <<'EOF'
+    cat > "$TRANSFER_SCRIPT" <<'EOF'
 #!/bin/bash
-
-# ========================================
-# Configuration
-# ========================================
 BACKUP_DIR="/root/backuper_marzneshin"
 REMOTE_IP="__REMOTE_IP__"
 REMOTE_USER="__REMOTE_USER__"
 REMOTE_PASS="__REMOTE_PASS__"
-
-# Remote target directories
 REMOTE_ETC="/etc/opt/marzneshin"
 REMOTE_NODE="/var/lib/marznode"
 REMOTE_MARZ="/var/lib/marzneshin"
 REMOTE_MYSQL="/root/Marzneshin-Mysql"
-
 DATE=$(date +"%Y-%m-%d_%H-%M-%S")
 OUTPUT_DIR="$BACKUP_DIR/backup_$DATE"
 
-# ========================================
-# Create local backup
-# ========================================
 mkdir -p "$OUTPUT_DIR"
+cp -r /etc/opt/marzneshin/ "$OUTPUT_DIR/etc_opt/" 2>/dev/null || true
+cp -r /var/lib/marznode/ "$OUTPUT_DIR/var_lib_marznode/" 2>/dev/null || true
+rsync -a --exclude='mysql' /var/lib/marzneshin/ "$OUTPUT_DIR/var_lib_marzneshin/" 2>/dev/null || true
 
-echo "Backing up folders locally..."
-
-# Copy /etc/opt/marzneshin/
-cp -r /etc/opt/marzneshin/ "$OUTPUT_DIR/etc_opt/" 2>/dev/null
-
-# Copy /var/lib/marznode/
-cp -r /var/lib/marznode/ "$OUTPUT_DIR/var_lib_marznode/" 2>/dev/null
-
-# Copy /var/lib/marzneshin/ excluding mysql folder
-rsync -a --exclude='mysql' /var/lib/marzneshin/ "$OUTPUT_DIR/var_lib_marzneshin/" 2>/dev/null
-
-# ----- Backup MySQL -----
 DOCKER_COMPOSE="/etc/opt/marzneshin/docker-compose.yml"
 if [ -f "$DOCKER_COMPOSE" ]; then
     DB_PASS=$(grep 'MARIADB_ROOT_PASSWORD:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
     DB_NAME=$(grep 'MARIADB_DATABASE:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
     DB_USER="root"
-
     if [ -n "$DB_PASS" ] && [ -n "$DB_NAME" ]; then
-        echo "Backing up MySQL database..."
         mkdir -p "$OUTPUT_DIR/Marzneshin-Mysql"
         mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$OUTPUT_DIR/Marzneshin-Mysql/marzneshin_backup.sql"
-        echo "MySQL backup completed."
-    else
-        echo "MySQL credentials not found in docker-compose.yml"
     fi
-else
-    echo "docker-compose.yml not found. Skipping MySQL backup."
 fi
 
-echo "Local backup completed at $OUTPUT_DIR"
+# Install sshpass
+command -v sshpass &>/dev/null || apt update && apt install -y sshpass
 
-# ========================================
-# Send backup to remote server
-# ========================================
-echo "Connecting to remote server $REMOTE_IP..."
-
-# Install sshpass if not installed
-if ! command -v sshpass &> /dev/null; then
-    echo "sshpass not found, installing..."
-    apt update && apt install -y sshpass
-fi
-
-# Remove existing folders on remote server
+# Clean remote
 sshpass -p "$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "$REMOTE_USER@$REMOTE_IP" "
-    echo 'Removing old folders if they exist...'
-    [ -d '$REMOTE_ETC' ] && rm -rf '$REMOTE_ETC'
-    [ -d '$REMOTE_NODE' ] && rm -rf '$REMOTE_NODE'
-    [ -d '$REMOTE_MARZ' ] && rm -rf '$REMOTE_MARZ'
-    [ -d '$REMOTE_MYSQL' ] && rm -rf '$REMOTE_MYSQL'
+    rm -rf '$REMOTE_ETC' '$REMOTE_NODE' '$REMOTE_MARZ' '$REMOTE_MYSQL'
     mkdir -p '$REMOTE_ETC' '$REMOTE_NODE' '$REMOTE_MARZ' '$REMOTE_MYSQL'
 "
 
-# Sync folders to remote server
-echo "Transferring folders to remote server..."
-
+# Transfer
 sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/etc_opt/" "$REMOTE_USER@$REMOTE_IP:$REMOTE_ETC/"
 sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/var_lib_marznode/" "$REMOTE_USER@$REMOTE_IP:$REMOTE_NODE/"
 sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/var_lib_marzneshin/" "$REMOTE_USER@$REMOTE_IP:$REMOTE_MARZ/"
 sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/Marzneshin-Mysql/" "$REMOTE_USER@$REMOTE_IP:$REMOTE_MYSQL/"
 
-if [ $? -eq 0 ]; then
-    echo "Backup successfully transferred to $REMOTE_IP"
-else
-    echo "Error transferring backup!"
-    exit 1
-fi
-
-# Restart marzneshin service on remote server
-echo "Restarting marzneshin service on remote server..."
 sshpass -p "$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "$REMOTE_USER@$REMOTE_IP" "marzneshin restart"
 
-echo "Backup and remote update completed successfully!"
-
-# ========================================
-# Cleanup local backup directory
-# ========================================
-echo "Cleaning up local backup directory..."
 rm -rf "$BACKUP_DIR"/*
-rm -rf "$OUTPUT_DIR"
-
-echo "Local backup directory cleaned."
+echo "Transfer completed!"
 EOF
 
-    # Replace placeholders
-    sed -i "s|__REMOTE_IP__|$REMOTE_IP|g" $TRANSFER_SCRIPT
-    sed -i "s|__REMOTE_USER__|$REMOTE_USER|g" $TRANSFER_SCRIPT
-    sed -i "s|__REMOTE_PASS__|$REMOTE_PASS|g" $TRANSFER_SCRIPT
-
-    chmod +x $TRANSFER_SCRIPT
-
-    # Run transfer immediately
-    bash $TRANSFER_SCRIPT
-
-    read -p "Press Enter to return to menu..."
+    sed -i "s|__REMOTE_IP__|$REMOTE_IP|g" "$TRANSFER_SCRIPT"
+    sed -i "s|__REMOTE_USER__|$REMOTE_USER|g" "$TRANSFER_SCRIPT"
+    sed -i "s|__REMOTE_PASS__|$REMOTE_PASS|g" "$TRANSFER_SCRIPT"
+    chmod +x "$TRANSFER_SCRIPT"
+    bash "$TRANSFER_SCRIPT"
+    read -p "Press Enter to return..."
 }
-
-install_requirements
 
 # ----- Main Menu -----
 function main_menu() {
     while true; do
         clear
         echo "========================================="
-        echo "         Backuper Marzneshin Menu"
+        echo " Backuper Marzneshin Menu"
         echo "========================================="
         echo "[1] Install Backuper"
         echo "[2] Remove Backuper"
@@ -336,7 +390,6 @@ function main_menu() {
         echo "[5] Exit"
         echo "-----------------------------------------"
         read -p "Choose an option: " OPTION
-
         case $OPTION in
             1) install_backuper ;;
             2) remove_backuper ;;
@@ -348,5 +401,6 @@ function main_menu() {
     done
 }
 
+# Start
+install_requirements
 main_menu
-
