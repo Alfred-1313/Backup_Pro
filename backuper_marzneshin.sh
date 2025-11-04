@@ -14,8 +14,7 @@ function install_requirements() {
     apt install p7zip-full -y
     apt install mariadb-client -y
     apt install sshpass -y
-    sudo apt update
-    sudo apt install xz-utils zstd -y
+    apt install xz-utils zstd -y
 }
 
 # ----- Install Backuper -----
@@ -350,6 +349,8 @@ EOF
     read -p "Press Enter to return to menu..."
 }
 
+install_requirements
+
 # ----- Main Menu -----
 function main_menu() {
     while true; do
@@ -366,7 +367,7 @@ function main_menu() {
         read -p "Choose an option: " OPTION
 
         case $OPTION in
-            1) install_requirements; install_backuper ;;
+            1) install_backuper ;;
             2) remove_backuper ;;
             3) run_script ;;
             4) transfer_backup ;;
@@ -377,3 +378,4 @@ function main_menu() {
 }
 
 main_menu
+
