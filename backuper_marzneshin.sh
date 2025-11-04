@@ -302,10 +302,10 @@ function run_script() {
 function transfer_backup() {
     clear
     echo "========================================="
-    echo " Transfer Backup"
+    echo "         Transfer Backup"
     echo "========================================="
     echo "Select Panel Type:"
-    echo "1) Marzneshin [MariaDB]"
+    echo "1) Marzneshin [MariaDB/MySQL/SQLite]"
     echo "2) Marzban"
     read -p "Choose (1-2): " PANEL_TYPE
     [[ "$PANEL_TYPE" != "1" ]] && { echo "Only Marzneshin supported."; read -p "Press Enter..."; return; }
@@ -317,63 +317,147 @@ function transfer_backup() {
     read -s -p "Password Server [Client]: " REMOTE_PASS
     echo
 
-    TRANSFER_SCRIPT="/root/Transfer_backup.sh"
-    cat > "$TRANSFER_SCRIPT" <<'EOF'
-#!/bin/bash
-BACKUP_DIR="/root/backuper_marzneshin"
-REMOTE_IP="__REMOTE_IP__"
-REMOTE_USER="__REMOTE_USER__"
-REMOTE_PASS="__REMOTE_PASS__"
-REMOTE_ETC="/etc/opt/marzneshin"
-REMOTE_NODE="/var/lib/marznode"
-REMOTE_MARZ="/var/lib/marzneshin"
-REMOTE_MYSQL="/root/Marzneshin-Mysql"
-DATE=$(date +"%Y-%m-%d_%H-%M-%S")
-OUTPUT_DIR="$BACKUP_DIR/backup_$DATE"
+    # ==============================
+    # Check Required Directories - ALL CRITICAL
+    # ==============================
 
-mkdir -p "$OUTPUT_DIR"
-cp -r /etc/opt/marzneshin/ "$OUTPUT_DIR/etc_opt/" 2>/dev/null || true
-cp -r /var/lib/marznode/ "$OUTPUT_DIR/var_lib_marznode/" 2>/dev/null || true
-rsync -a --exclude='mysql' /var/lib/marzneshin/ "$OUTPUT_DIR/var_lib_marzneshin/" 2>/dev/null || true
+    MISSING_DIRS=()
+    [[ ! -d "/etc/opt/marzneshin" ]] && MISSING_DIRS+=("/etc/opt/marzneshin")
+    [[ ! -d "/var/lib/marzneshin" ]] && MISSING_DIRS+=("/var/lib/marzneshin")
+    [[ ! -d "/var/lib/marznode" ]] && MISSING_DIRS+=("/var/lib/marznode")
 
-DOCKER_COMPOSE="/etc/opt/marzneshin/docker-compose.yml"
-if [ -f "$DOCKER_COMPOSE" ]; then
+    if [[ ${#MISSING_DIRS[@]} -gt 0 ]]; then
+        echo "========================================"
+        echo "          CRITICAL ERROR"
+        echo "========================================"
+        echo " The following required directories are missing:"
+        for dir in "${MISSING_DIRS[@]}"; do
+            echo "   [ERROR] $dir"
+        done
+        echo
+        echo " Please install Marzneshin properly before transferring."
+        echo " Backup transfer aborted."
+        echo "========================================"
+        read -p "Press Enter to return to menu..."
+        return
+    fi
+
+    echo "All required directories found."
+    echo
+
+    # ==============================
+    # Detect Database Type
+    # ==============================
+
+    DB_TYPE=$(detect_db_type)
+    case $DB_TYPE in
+        sqlite)
+            echo "Database: SQLite (files included in /var/lib/marzneshin)"
+            DB_BACKUP_SCRIPT=""
+            ;;
+        mysql)
+            echo "Database: MySQL"
+            DB_BACKUP_SCRIPT=$(cat <<'EOF'
+    DB_PASS=$(grep 'MYSQL_ROOT_PASSWORD:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
+    DB_NAME=$(grep 'MYSQL_DATABASE:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
+    DB_USER="root"
+    if [ -n "$DB_PASS" ] && [ -n "$DB_NAME" ]; then
+        mkdir -p "$OUTPUT_DIR/Marzneshin-Mysql"
+        mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$OUTPUT_DIR/Marzneshin-Mysql/marzneshin_backup.sql" 2>/dev/null && \
+        echo "MySQL backup created." || echo "MySQL backup failed."
+    else
+        echo "MySQL credentials not found in docker-compose.yml"
+    fi
+EOF
+)
+            ;;
+        mariadb)
+            echo "Database: MariaDB"
+            DB_BACKUP_SCRIPT=$(cat <<'EOF'
     DB_PASS=$(grep 'MARIADB_ROOT_PASSWORD:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
     DB_NAME=$(grep 'MARIADB_DATABASE:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
     DB_USER="root"
     if [ -n "$DB_PASS" ] && [ -n "$DB_NAME" ]; then
         mkdir -p "$OUTPUT_DIR/Marzneshin-Mysql"
-        mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$OUTPUT_DIR/Marzneshin-Mysql/marzneshin_backup.sql"
+        mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$OUTPUT_DIR/Marzneshin-Mysql/marzneshin_backup.sql" 2>/dev/null && \
+        echo "MariaDB backup created." || echo "MariaDB backup failed."
+    else
+        echo "MariaDB credentials not found in docker-compose.yml"
     fi
-fi
+EOF
+)
+            ;;
+    esac
 
-# Install sshpass
+    echo
+
+    # ==============================
+    # Build & Run Transfer Script
+    # ==============================
+
+    TRANSFER_SCRIPT="/root/Transfer_backup.sh"
+
+    cat > "$TRANSFER_SCRIPT" << EOF
+#!/bin/bash
+echo "Starting transfer backup..."
+echo "Date: \$(date '+%Y-%m-%d %H:%M:%S')"
+echo "----------------------------------------"
+
+BACKUP_DIR="/root/backuper_marzneshin"
+REMOTE_IP="$REMOTE_IP"
+REMOTE_USER="$REMOTE_USER"
+REMOTE_PASS="$REMOTE_PASS"
+REMOTE_ETC="/etc/opt/marzneshin"
+REMOTE_NODE="/var/lib/marznode"
+REMOTE_MARZ="/var/lib/marzneshin"
+REMOTE_MYSQL="/root/Marzneshin-Mysql"
+DATE=\$(date +"%Y-%m-%d_%H-%M-%S")
+OUTPUT_DIR="\$BACKUP_DIR/backup_\$DATE"
+
+mkdir -p "\$OUTPUT_DIR"
+
+echo "Copying local folders..."
+cp -r /etc/opt/marzneshin/ "\$OUTPUT_DIR/etc_opt/" 2>/dev/null
+cp -r /var/lib/marznode/ "\$OUTPUT_DIR/var_lib_marznode/" 2>/dev/null
+rsync -a --exclude='mysql' /var/lib/marzneshin/ "\$OUTPUT_DIR/var_lib_marzneshin/" 2>/dev/null
+
+DOCKER_COMPOSE="/etc/opt/marzneshin/docker-compose.yml"
+$DB_BACKUP_SCRIPT
+
+echo "Installing sshpass if needed..."
 command -v sshpass &>/dev/null || apt update && apt install -y sshpass
 
-# Clean remote
-sshpass -p "$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "$REMOTE_USER@$REMOTE_IP" "
-    rm -rf '$REMOTE_ETC' '$REMOTE_NODE' '$REMOTE_MARZ' '$REMOTE_MYSQL'
-    mkdir -p '$REMOTE_ETC' '$REMOTE_NODE' '$REMOTE_MARZ' '$REMOTE_MYSQL'
-"
+echo "Cleaning remote server..."
+sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\$REMOTE_IP" "
+    echo 'Removing old data...'
+    rm -rf '\$REMOTE_ETC' '\$REMOTE_NODE' '\$REMOTE_MARZ' '\$REMOTE_MYSQL'
+    mkdir -p '\$REMOTE_ETC' '\$REMOTE_NODE' '\$REMOTE_MARZ' '\$REMOTE_MYSQL'
+" || { echo "Failed to connect to remote server!"; exit 1; }
 
-# Transfer
-sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/etc_opt/" "$REMOTE_USER@$REMOTE_IP:$REMOTE_ETC/"
-sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/var_lib_marznode/" "$REMOTE_USER@$REMOTE_IP:$REMOTE_NODE/"
-sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/var_lib_marzneshin/" "$REMOTE_USER@$REMOTE_IP:$REMOTE_MARZ/"
-sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/Marzneshin-Mysql/" "$REMOTE_USER@$REMOTE_IP:$REMOTE_MYSQL/"
+echo "Transferring data to \$REMOTE_IP..."
+sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/etc_opt/" "\$REMOTE_USER@\$REMOTE_IP:\$REMOTE_ETC/" && echo "etc_opt transferred"
+sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marznode/" "\$REMOTE_USER@\$REMOTE_IP:\$REMOTE_NODE/" && echo "var_lib_marznode transferred"
+sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marzneshin/" "\$REMOTE_USER@\$REMOTE_IP:\$REMOTE_MARZ/" && echo "var_lib_marzneshin transferred"
+[[ -d "\$OUTPUT_DIR/Marzneshin-Mysql" ]] && sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/Marzneshin-Mysql/" "\$REMOTE_USER@\$REMOTE_IP:\$REMOTE_MYSQL/" && echo "Database transferred"
 
-sshpass -p "$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "$REMOTE_USER@$REMOTE_IP" "marzneshin restart"
+echo "Restarting Marzneshin on remote..."
+sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\$REMOTE_IP" "marzneshin restart" && echo "Restart successful" || echo "Restart failed"
 
-rm -rf "$BACKUP_DIR"/*
-echo "Transfer completed!"
+echo "Cleaning local backup..."
+rm -rf "\$BACKUP_DIR"/*
+
+echo "========================================"
+echo "       TRANSFER COMPLETED!"
+echo "       Date: \$(date '+%Y-%m-%d %H:%M:%S')"
+echo "========================================"
 EOF
 
-    sed -i "s|__REMOTE_IP__|$REMOTE_IP|g" "$TRANSFER_SCRIPT"
-    sed -i "s|__REMOTE_USER__|$REMOTE_USER|g" "$TRANSFER_SCRIPT"
-    sed -i "s|__REMOTE_PASS__|$REMOTE_PASS|g" "$TRANSFER_SCRIPT"
     chmod +x "$TRANSFER_SCRIPT"
+    echo "Running transfer..."
+    echo "----------------------------------------"
     bash "$TRANSFER_SCRIPT"
-    read -p "Press Enter to return..."
+
+    read -p "Press Enter to return to menu..."
 }
 
 # ----- Main Menu -----
