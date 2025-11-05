@@ -277,7 +277,7 @@ function install_backuper() {
 function remove_backuper() {
     clear
     echo "Removing Backuper..."
-    rm -f /root/marz_backup.sh /root/Transfer_backup.sh
+    rm -f /root/marz_backup.sh
     rm -rf /root/backuper_marzneshin
     crontab -l 2>/dev/null | grep -v 'marz_backup.sh' | crontab -
     echo "Backuper removed successfully."
@@ -315,7 +315,7 @@ function transfer_backup() {
     echo
 
     # ==============================
-    # Check Required Directories - ALL CRITICAL
+    # Check Required Directories Marzneshin - ALL CRITICAL
     # ==============================
 
     MISSING_DIRS=()
@@ -343,7 +343,7 @@ function transfer_backup() {
     echo
 
     # ==============================
-    # Detect Database Type
+    # Detect Database Type Marzneshin
     # ==============================
 
     DB_TYPE=$(detect_db_type)
