@@ -8,7 +8,7 @@ function install_requirements() {
     apt install zip unzip tar gzip p7zip-full mariadb-client sshpass xz-utils zstd -y
 }
 
-# ----- Detect Database Type -----
+# ----- Detect Database Type Marzneshin-----
 function detect_db_type() {
     local docker_file="/etc/opt/marzneshin/docker-compose.yml"
     if [[ ! -f "$docker_file" ]]; then
@@ -35,7 +35,7 @@ function detect_db_type() {
     fi
 }
 
-# ----- Create Backup Script Based on DB Type -----
+# ----- Create Backup Script Based on DB Type Marzneshin-----
 function create_backup_script() {
     local db_type="$1"
     local script_file="/root/marz_backup.sh"
@@ -54,17 +54,17 @@ ARCHIVE=""
 mkdir -p "$BACKUP_DIR"
 cd "$BACKUP_DIR" || exit 1
 
-# Clean previous content
+# Clean previous content Marzneshin
 rm -rf etc/opt/marzneshin var/lib/marznode var/lib/marzneshin marzneshin_backup.sql
 
-# Copy paths
+# Copy paths Marzneshin
 mkdir -p etc/opt var/lib/marznode var/lib/marzneshin
 cp -r /etc/opt/marzneshin/ etc/opt/ 2>/dev/null || true
 rsync -a --include='xray_config.json' --exclude='*' /var/lib/marznode/ var/lib/marznode/ 2>/dev/null || true
 rsync -a --exclude='mysql' --exclude='assets' /var/lib/marzneshin/ var/lib/marzneshin/ 2>/dev/null || true
 
 # ==============================
-# Database Backup Section
+# Database Backup Section Marzneshin
 # ==============================
 DB_BACKUP_DONE=0
 DOCKER_COMPOSE="/etc/opt/marzneshin/docker-compose.yml"
