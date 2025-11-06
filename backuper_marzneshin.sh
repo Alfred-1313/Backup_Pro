@@ -5,7 +5,7 @@ function install_requirements() {
     clear
     echo "Installing required packages..."
     apt update -y && apt upgrade -y
-    apt install zip unzip tar gzip p7zip-full mariadb-client sshpass xz-utils zstd -y
+    apt install zip unzip tar gzip p7zip-full mariadb-client sshpass xz-utils zstd postgresql-client-common -y
 }
 
 # ----- Detect Database Type Marzneshin-----
