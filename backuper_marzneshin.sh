@@ -486,7 +486,6 @@ function run_script() {
     read -p "Press Enter to return..."
 }
 
-# ----- Transfer Backup (Marzneshin & Pasarguard) -----
 function transfer_backup() {
     clear
     echo "========================================="
@@ -503,6 +502,9 @@ function transfer_backup() {
     read -p "User Server [Client]: " REMOTE_USER
     read -s -p "Password Server [Client]: " REMOTE_PASS
     echo
+
+    TRANSFER_SCRIPT=$(mktemp /tmp/Transfer_backup.XXXXXX.sh)
+    trap 'rm -f "$TRANSFER_SCRIPT"' EXIT
 
     if [[ "$PANEL_TYPE" == "1" ]]; then
         PANEL_NAME="Marzneshin"
@@ -572,7 +574,6 @@ EOF
                 ;;
         esac
 
-        TRANSFER_SCRIPT="/root/Transfer_backup.sh"
         cat > "$TRANSFER_SCRIPT" <<EOF
 #!/bin/bash
 echo "Starting transfer backup ($PANEL_NAME)..."
@@ -744,7 +745,6 @@ EOF
                 ;;
         esac
 
-        TRANSFER_SCRIPT="/root/Transfer_backup.sh"
         cat > "$TRANSFER_SCRIPT" <<EOF
 #!/bin/bash
 echo "Starting transfer backup ($PANEL_NAME)..."
@@ -809,7 +809,8 @@ EOF
     echo "Running transfer..."
     echo "----------------------------------------"
     bash "$TRANSFER_SCRIPT"
-
+    rm -f "$TRANSFER_SCRIPT"
+    trap - EXIT
     read -p "Press Enter to return to menu..."
 }
 
