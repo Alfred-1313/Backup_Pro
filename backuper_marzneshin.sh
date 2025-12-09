@@ -61,7 +61,7 @@ function detect_db_type() {
 # ----- Create Backup Script Based on DB Type Marzneshin -----
 function create_backup_script() {
     local db_type="$1"
-    local script_file="/root/marz_backup.sh"
+    local script_file="/root/marzneshin_backup.sh"
     local backup_dir="/root/backuper_marzneshin"
 
     cat > "$script_file" <<'EOF'
@@ -437,15 +437,15 @@ function install_backuper() {
         esac
 
         create_backup_script "$DB_TYPE"
-        sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" /root/marz_backup.sh
-        sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/marz_backup.sh
-        sed -i "s|__CAPTION__|$CAPTION|g" /root/marz_backup.sh
-        sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/marz_backup.sh
+        sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" /root/marzneshin_backup.sh
+        sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/marzneshin_backup.sh
+        sed -i "s|__CAPTION__|$CAPTION|g" /root/marzneshin_backup.sh
+        sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/marzneshin_backup.sh
 
-        (crontab -l 2>/dev/null | grep -v "marz_backup.sh"; echo "$CRON_TIME bash /root/marz_backup.sh") | crontab -
+        (crontab -l 2>/dev/null | grep -v "marzneshin_backup.sh"; echo "$CRON_TIME bash /root/marzneshin_backup.sh") | crontab -
 
         echo -e "\nStep 7 - Running first backup..."
-        bash /root/marz_backup.sh
+        bash /root/marzneshin_backup.sh
 
         echo -e "\nBackup successfully sent"
         curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
@@ -459,9 +459,9 @@ function install_backuper() {
 function remove_backuper() {
     clear
     echo "Removing Backuper..."
-    rm -f /root/marz_backup.sh /root/pasarguard_backup.sh
+    rm -f /root/marzneshin_backup.sh /root/pasarguard_backup.sh
     rm -rf /root/backuper_marzneshin /root/backuper_pasarguard
-    crontab -l 2>/dev/null | grep -v 'marz_backup.sh' | grep -v 'pasarguard_backup.sh' | crontab -
+    crontab -l 2>/dev/null | grep -v 'marzneshin_backup.sh' | grep -v 'pasarguard_backup.sh' | crontab -
     echo "Backuper removed successfully."
     read -p "Press Enter to return..."
 }
@@ -469,8 +469,8 @@ function remove_backuper() {
 # ----- Run Script Manually -----
 function run_script() {
     clear
-    if [[ -f /root/marz_backup.sh ]]; then
-        bash /root/marz_backup.sh
+    if [[ -f /root/marzneshin_backup.sh ]]; then
+        bash /root/marzneshin_backup.sh
     elif [[ -f /root/pasarguard_backup.sh ]]; then
         bash /root/pasarguard_backup.sh
     else
