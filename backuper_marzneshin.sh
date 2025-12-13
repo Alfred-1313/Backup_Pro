@@ -8,6 +8,35 @@ function install_requirements() {
     apt install zip unzip tar gzip p7zip-full mariadb-client sshpass xz-utils zstd postgresql-client-common -y
 }
 
+# ----- Detect Database Type Marzban -----
+detect_db_type_Marzban() {
+    local env_file="/opt/marzban/.env"
+    [[ ! -f "$env_file" ]] && { echo ".env not found."; echo ""; return; }
+
+    local line db_url
+    line=$(grep -E '^\s*SQLALCHEMY_DATABASE_URL\s*=' "$env_file" | tail -n1)
+    [[ -z "$line" ]] && { echo "SQLALCHEMY_DATABASE_URL not found."; echo ""; return; }
+
+    db_url=${line#*=}
+    db_url=$(echo "$db_url" | sed -e 's/[[:space:]]*#.*$//' \
+                                  -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                                  -e 's/^["'\'']\(.*\)["'\'']$/\1/')
+    [[ -z "$db_url" ]] && { echo "SQLALCHEMY_DATABASE_URL not found."; echo ""; return; }
+
+    if [[ "$db_url" == sqlite* ]]; then
+        echo "sqlite"
+    elif [[ "$db_url" == mariadb* ]]; then
+        echo "mariadb"
+    elif [[ "$db_url" == mysql* || "$db_url" == *"mysql+"* || "$db_url" == *"mysql://"* ]]; then
+        echo "mysql"
+    elif [[ "$db_url" == *"mariadb"* ]]; then
+        echo "mariadb"
+    else
+        echo "Unsupported DB URL: $db_url"
+        echo ""
+    fi
+}
+
 # ----- Detect Database Type Pasarguard -----
 function detect_db_type_pasarguard() {
     local env_file="/opt/pasarguard/.env"
@@ -31,6 +60,7 @@ function detect_db_type_pasarguard() {
         echo ""
     fi
 }
+
 
 # ----- Detect Database Type Marzneshin -----
 function detect_db_type() {
@@ -58,6 +88,153 @@ function detect_db_type() {
     else
         echo "sqlite"
     fi
+}
+# ----- Create Backup Script Based on DB Type Marzban -----
+create_backup_script_Marzban() {
+    local db_type="$1"
+    local script_file="/root/marzban_backup.sh"
+
+    cat > "$script_file" <<'EOF'
+#!/bin/bash
+BACKUP_DIR="/root/backuper_marzban"
+BOT_TOKEN="__BOT_TOKEN__"
+CHAT_ID="__CHAT_ID__"
+CAPTION="__CAPTION__"
+COMP_TYPE="__COMP_TYPE__"
+DATE=$(date +"%Y-%m-%d_%H-%M-%S")
+OUTPUT_BASE="$BACKUP_DIR/backup_$DATE"
+ARCHIVE=""
+
+mkdir -p "$BACKUP_DIR"
+cd "$BACKUP_DIR" || exit 1
+
+# Copy paths Marzban
+mkdir -p opt/marzban var/lib/marzban
+rsync -a /opt/marzban/ opt/marzban/ 2>/dev/null || true
+rsync -a --exclude='mysql/' /var/lib/marzban/ var/lib/marzban/ 2>/dev/null || true
+
+# ==============================
+# Database Backup Section Marzban
+# ==============================
+DB_BACKUP_DONE=0
+ENV_FILE="/opt/marzban/.env"
+if [ -f "$ENV_FILE" ]; then
+EOF
+
+    if [[ "$db_type" == "sqlite" ]]; then
+        cat >> "$script_file" <<'EOF'
+    # SQLite: No external dump needed
+    echo "SQLite detected. DB files included in /var/lib/marzban/"
+    DB_BACKUP_DONE=1
+EOF
+    elif [[ "$db_type" == "mysql" || "$db_type" == "mariadb" ]]; then
+        cat >> "$script_file" <<'EOF'
+    DB_NAME="marzban"
+    DB_USER="marzban"
+    ENV_FILE="/opt/marzban/.env"
+    DB_PASS=""
+
+    # Read MYSQL_PASSWORD from .env
+    DB_PASS=$(
+        grep -E '^[[:space:]]*MYSQL_PASSWORD[[:space:]]*=' "$ENV_FILE" \
+        | tail -n1 \
+        | sed -E 's/^[[:space:]]*MYSQL_PASSWORD[[:space:]]*=[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/' \
+        | tr -d "'"
+    )
+
+    if [ -n "$DB_PASS" ]; then
+        echo "Backing up MySQL/MariaDB database (user=$DB_USER, db=$DB_NAME)..."
+        mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$BACKUP_DIR/marzneshin_backup.sql" 2>/dev/null && DB_BACKUP_DONE=1
+        [ $DB_BACKUP_DONE -eq 1 ] && echo "DB backup completed." || echo "DB backup failed."
+    else
+        echo "MYSQL_PASSWORD not found (or empty) in $ENV_FILE."
+    fi
+EOF
+    fi
+
+    cat >> "$script_file" <<'EOF'
+else
+    echo ".env not found. Skipping DB backup."
+fi
+
+# ==============================
+# Compression Section
+# ==============================
+ARCHIVE="$OUTPUT_BASE"
+if [ "$COMP_TYPE" == "zip" ]; then
+    ARCHIVE="$OUTPUT_BASE.zip"
+    zip -r "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "tgz" ]; then
+    ARCHIVE="$OUTPUT_BASE.tgz"
+    tar -czf "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "7z" ]; then
+    ARCHIVE="$OUTPUT_BASE.7z"
+    7z a -t7z -m0=lzma2 -mx=9 -mfb=256 -md=1536m -ms=on "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "tar" ]; then
+    ARCHIVE="$OUTPUT_BASE.tar"
+    tar -cf "$ARCHIVE" . > /dev/null
+elif [ "$COMP_TYPE" == "gzip" ] || [ "$COMP_TYPE" == "gz" ]; then
+    ARCHIVE="$OUTPUT_BASE.tar.gz"
+    tar -cf - . | gzip > "$ARCHIVE"
+else
+    ARCHIVE="$OUTPUT_BASE.zip"
+    zip -r "$ARCHIVE" . > /dev/null
+fi
+
+# ==============================
+# File size check & Telegram send
+# ==============================
+if [ ! -f "$ARCHIVE" ]; then
+    echo "Backup file not created!"
+    rm -rf "$BACKUP_DIR"/*
+    exit 1
+fi
+
+FILE_SIZE_MB=$(du -m "$ARCHIVE" | cut -f1)
+echo "Backup created: $ARCHIVE ($FILE_SIZE_MB MB)"
+
+# Send to Telegram
+if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+    SCRIPT_NAME=$(basename "$0")
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    REPORT_CAPTION=$(cat <<EOFCAP
+$CAPTION
+
+➖➖➖➖➖➖➖➖➖➖
+
+📦 Backup Report
+
+• <code>Script Name:</code> $SCRIPT_NAME
+• <code>IP Server:</code> $SERVER_IP
+• <code>Date:</code> $(date '+%Y-%m-%d %H:%M:%S')
+• <code>Panel:</code> __PANEL_NAME__
+• <code>Database:</code> __DB_TYPE__
+• <code>Backup File:</code> /opt/marzban/ & /var/lib/marzban/
+• <code>Backup Size:</code> ${FILE_SIZE_MB} MB
+EOFCAP
+)
+    CAPTION_WITH_SIZE="$REPORT_CAPTION"
+    if [ "$FILE_SIZE_MB" -gt 50 ]; then
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+             -d chat_id="$CHAT_ID" \
+             -d text="Warning: Backup file > 50MB (${FILE_SIZE_MB} MB). Telegram may not accept it." >/dev/null
+    fi
+    curl -s \
+         -F chat_id="$CHAT_ID" \
+         -F parse_mode=HTML \
+         -F caption="$CAPTION_WITH_SIZE" \
+         -F document=@"$ARCHIVE" \
+         "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" >/dev/null && \
+         echo "Backup successfully sent to Telegram!" || echo "Failed to send via Telegram."
+else
+    echo "Telegram credentials missing. Skipping send."
+fi
+
+# Cleanup
+rm -rf "$BACKUP_DIR"/*
+EOF
+
+    chmod +x "$script_file"
 }
 
 # ----- Create Backup Script Based on DB Type Marzneshin -----
@@ -170,13 +347,35 @@ echo "Backup created: $ARCHIVE ($FILE_SIZE_MB MB)"
 
 # Send to Telegram
 if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
-    CAPTION_WITH_SIZE="$CAPTION\nTotal size: ${FILE_SIZE_MB} MB"
+    SCRIPT_NAME=$(basename "$0")
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    REPORT_CAPTION=$(cat <<EOFCAP
+$CAPTION
+
+➖➖➖➖➖➖➖➖➖➖
+
+📦 Backup Report
+
+• <code>Script Name:</code> $SCRIPT_NAME
+• <code>IP Server:</code> $SERVER_IP
+• <code>Date:</code> $(date '+%Y-%m-%d %H:%M:%S')
+• <code>Panel:</code> __PANEL_NAME__
+• <code>Database:</code> __DB_TYPE__
+• <code>Backup File:</code> /etc/opt/marzneshin/ & /var/lib/marzneshin/ & /var/lib/marznode/
+• <code>Backup Size:</code> ${FILE_SIZE_MB} MB
+EOFCAP
+)
+    CAPTION_WITH_SIZE="$REPORT_CAPTION"
     if [ "$FILE_SIZE_MB" -gt 50 ]; then
         curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
              -d chat_id="$CHAT_ID" \
              -d text="Warning: Backup file > 50MB (${FILE_SIZE_MB} MB). Telegram may not accept it." >/dev/null
     fi
-    curl -s -F chat_id="$CHAT_ID" -F caption="$CAPTION_WITH_SIZE" -F document=@"$ARCHIVE" \
+    curl -s \
+         -F chat_id="$CHAT_ID" \
+         -F parse_mode=HTML \
+         -F caption="$CAPTION_WITH_SIZE" \
+         -F document=@"$ARCHIVE" \
          "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" >/dev/null && \
          echo "Backup successfully sent to Telegram!" || echo "Failed to send via Telegram."
 else
@@ -308,13 +507,36 @@ echo "Backup created: $ARCHIVE ($FILE_SIZE_MB MB)"
 
 # Send to Telegram
 if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
-    CAPTION_WITH_SIZE="$CAPTION\nTotal size: ${FILE_SIZE_MB} MB"
+    SCRIPT_NAME=$(basename "$0")
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    REPORT_CAPTION=$(cat <<EOFCAP
+$CAPTION
+
+➖➖➖➖➖➖➖➖➖➖
+
+📦 Backup Report
+
+• <code>Script Name:</code> $SCRIPT_NAME
+• <code>IP Server:</code> $SERVER_IP
+• <code>Date:</code> $(date '+%Y-%m-%d %H:%M:%S')
+• <code>Panel:</code> __PANEL_NAME__
+• <code>Database:</code> __DB_TYPE__
+• <code>Backup File:</code> $ARCHIVE
+• <code>Backup Size:</code> ${FILE_SIZE_MB} MB
+EOFCAP
+)
+    CAPTION_WITH_SIZE="$REPORT_CAPTION"
     if [ "$FILE_SIZE_MB" -gt 50 ]; then
         curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
              -d chat_id="$CHAT_ID" \
+             -d parse_mode=HTML \
              -d text="Warning: Backup file > 50MB (${FILE_SIZE_MB} MB). Telegram may not accept it." >/dev/null
     fi
-    curl -s -F chat_id="$CHAT_ID" -F caption="$CAPTION_WITH_SIZE" -F document=@"$ARCHIVE" \
+    curl -s \
+         -F chat_id="$CHAT_ID" \
+         -F parse_mode=HTML \
+         -F caption="$CAPTION_WITH_SIZE" \
+         -F document=@"$ARCHIVE" \
          "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" >/dev/null && \
          echo "Backup successfully sent to Telegram!" || echo "Failed to send via Telegram."
 else
@@ -329,7 +551,7 @@ EOF
 }
 
 # ----- Create Backup Script Based on DB Type X-UI -----
-function create_backup_script_x-ui() {
+function create_backup_script_x_ui() {
     local db_type="$1"
     local script_file="/root/x-ui_backup.sh"
     local backup_dir="/root/backuper_x-ui"
@@ -390,15 +612,39 @@ echo "Backup created: $ARCHIVE ($FILE_SIZE_MB MB)"
 
 # Send to Telegram
 if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
-    CAPTION_WITH_SIZE="$CAPTION\nTotal size: ${FILE_SIZE_MB} MB"
-    if [ "$FILE_SIZE_MB" -gt 50 ]; then
-        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-             -d chat_id="$CHAT_ID" \
-             -d text="Warning: Backup file > 50MB (${FILE_SIZE_MB} MB). Telegram may not accept it." >/dev/null
-    fi
-    curl -s -F chat_id="$CHAT_ID" -F caption="$CAPTION_WITH_SIZE" -F document=@"$ARCHIVE" \
-         "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" >/dev/null && \
-         echo "Backup successfully sent to Telegram!" || echo "Failed to send via Telegram."
+    SCRIPT_NAME=$(basename "$0")
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+REPORT_CAPTION=$(cat <<EOFCAP
+
+➖➖➖➖➖➖➖➖➖➖
+
+📦 Backup Report
+
+• <code>Script Name:</code> $SCRIPT_NAME
+• <code>IP Server:</code> $SERVER_IP
+• <code>Date:</code> $(date '+%Y-%m-%d')
+• <code>Panel:</code> X-ui
+• <code>Backup File:</code> /etc/x-ui/ & /root/cert/
+• <code>Usage Backup:</code> ${FILE_SIZE_MB} MB
+EOFCAP
+)
+
+CAPTION_WITH_SIZE="$REPORT_CAPTION"
+
+if [ "$FILE_SIZE_MB" -gt 50 ]; then
+    curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+         -d chat_id="$CHAT_ID" \
+         -d parse_mode=HTML \
+         -d text="Warning: Backup file &gt; 50MB (${FILE_SIZE_MB} MB). Telegram may not accept it." >/dev/null
+fi
+
+curl -s \
+     -F chat_id="$CHAT_ID" \
+     -F parse_mode=HTML \
+     -F caption="$CAPTION_WITH_SIZE" \
+     -F document=@"$ARCHIVE" \
+     "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" >/dev/null && \
+     echo "Backup successfully sent to Telegram!" || echo "Failed to send via Telegram."
 else
     echo "Telegram credentials missing. Skipping send."
 fi
@@ -411,7 +657,7 @@ EOF
 }
 
 # ----- Install Backuper -----
-function install_backuper() {
+install_backuper() {
     while true; do
         clear
         echo "========================================="
@@ -421,6 +667,7 @@ function install_backuper() {
         echo "[1] Marzneshin"
         echo "[2] Pasarguard"
         echo "[3] X-ui"
+        echo "[4] Marzban"
         echo
         echo "-----------------------------------------"
         read -p "Choose an option: " PANEL_OPTION
@@ -429,6 +676,7 @@ function install_backuper() {
             1) PANEL_TYPE="Marzneshin"; break ;;
             2) PANEL_TYPE="Pasarguard"; break ;;
             3) PANEL_TYPE="X-ui"; break ;;
+            4) PANEL_TYPE="Marzban"; break ;;
             *) echo "Invalid choice. Try again."; sleep 1 ;;
         esac
     done
@@ -467,13 +715,9 @@ function install_backuper() {
         *) COMP_TYPE="zip"; echo "Invalid. Default: zip" ;;
     esac
 
-[[ "$PANEL_TYPE" == "Marzneshin" ]] && DEFAULT_CAPTION="Marzneshin Backup - $(date +"%Y-%m-%d %H:%M")"
-[[ "$PANEL_TYPE" == "Pasarguard" ]] && DEFAULT_CAPTION="Pasarguard Backup - $(date +"%Y-%m-%d %H:%M")"
-[[ "$PANEL_TYPE" == "X-ui" ]] && DEFAULT_CAPTION="X-ui Backup - $(date +"%Y-%m-%d %H:%M")"
-
     echo -e "\nStep 4 - Enter File Caption"
     read -p "Caption File: " CAPTION
-    [[ -z "$CAPTION" ]] && CAPTION="$DEFAULT_CAPTION"
+    [[ -z "$CAPTION" ]] && CAPTION=""
 
     # Step 5 - Backup Interval
     echo -e "\nStep 5 - Select Backup Interval"
@@ -493,14 +737,32 @@ function install_backuper() {
 
     # Step 6 - Detect Database + build scripts
     if [[ "$PANEL_TYPE" == "Pasarguard" ]]; then
+        MISSING_DIRS=()
+        [[ ! -d "/opt/pasarguard" ]]     && MISSING_DIRS+=("/opt/pasarguard")
+        [[ ! -d "/opt/pg-node" ]]        && MISSING_DIRS+=("/opt/pg-node")
+        [[ ! -d "/var/lib/pasarguard" ]] && MISSING_DIRS+=("/var/lib/pasarguard")
+        [[ ! -d "/var/lib/pg-node" ]]    && MISSING_DIRS+=("/var/lib/pg-node")
+        if (( ${#MISSING_DIRS[@]} > 0 )); then
+            echo
+            echo "========================================"
+            echo "   Pasarguard not detected on server"
+            echo "========================================"
+            echo "Missing required paths:"
+            for d in "${MISSING_DIRS[@]}"; do echo "  - $d"; done
+            echo
+            echo "Returning to main menu..."
+            read -p "Press Enter to continue..." _
+            return
+        fi
+
         echo -e "\nStep 6 - Detecting Database Type (Pasarguard)"
         DB_TYPE=$(detect_db_type_pasarguard)
         case $DB_TYPE in
-            postgresql) echo "Pasarguard: PostgreSQL detected." ;;
+            postgresql)    echo "Pasarguard: PostgreSQL detected." ;;
             mariadb|mysql) echo "Pasarguard: MariaDB/MySQL detected." ;;
-            sqlite) echo "Pasarguard: SQLite detected." ;;
-            "")         echo "DB type not found. Aborting."; return ;;
-            *)          echo "Unsupported DB type. Aborting."; return ;;
+            sqlite)        echo "Pasarguard: SQLite detected." ;;
+            "")            echo "DB type not found. Aborting."; return ;;
+            *)             echo "Unsupported DB type. Aborting."; return ;;
         esac
 
         create_backup_script_pasarguard "$DB_TYPE"
@@ -508,24 +770,40 @@ function install_backuper() {
         sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/pasarguard_backup.sh
         sed -i "s|__CAPTION__|$CAPTION|g" /root/pasarguard_backup.sh
         sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/pasarguard_backup.sh
+        sed -i "s|__PANEL_NAME__|Pasarguard|g" /root/pasarguard_backup.sh
+        sed -i "s|__DB_TYPE__|$DB_TYPE|g" /root/pasarguard_backup.sh
 
         (crontab -l 2>/dev/null | grep -v "pasarguard_backup.sh"; echo "$CRON_TIME bash /root/pasarguard_backup.sh") | crontab -
-
         echo -e "\nStep 7 - Running first backup..."
         bash /root/pasarguard_backup.sh
-
         echo -e "\nBackup successfully sent"
-        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-             -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
 
-    else
-        echo -e "\nStep 6 - Detecting Database Type"
+    elif [[ "$PANEL_TYPE" == "Marzneshin" ]]; then
+        MISSING_DIRS=()
+        [[ ! -d "/etc/opt/marzneshin" ]] && MISSING_DIRS+=("/etc/opt/marzneshin")
+        [[ ! -d "/var/lib/marzneshin" ]] && MISSING_DIRS+=("/var/lib/marzneshin")
+        [[ ! -d "/var/lib/marznode" ]]   && MISSING_DIRS+=("/var/lib/marznode")
+        if (( ${#MISSING_DIRS[@]} > 0 )); then
+            echo
+            echo "========================================"
+            echo "   Marzneshin not detected on server"
+            echo "========================================"
+            echo "Missing required paths:"
+            for d in "${MISSING_DIRS[@]}"; do echo "  - $d"; done
+            echo
+            echo "Returning to main menu..."
+            read -p "Press Enter to continue..." _
+            return
+        fi
+
+        echo -e "\nStep 6 - Detecting Database Type (Marzneshin)"
         DB_TYPE=$(detect_db_type)
         case $DB_TYPE in
             sqlite)   echo "SQLite detected." ;;
             mysql)    echo "MySQL detected." ;;
             mariadb)  echo "MariaDB detected." ;;
-            *) echo "DB type unknown/unsupported. Aborting."; return ;;
+            *)        echo "DB type unknown/unsupported. Aborting."; return ;;
         esac
 
         create_backup_script "$DB_TYPE"
@@ -533,53 +811,111 @@ function install_backuper() {
         sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/marzneshin_backup.sh
         sed -i "s|__CAPTION__|$CAPTION|g" /root/marzneshin_backup.sh
         sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/marzneshin_backup.sh
+        sed -i "s|__PANEL_NAME__|Marzneshin|g" /root/marzneshin_backup.sh
+        sed -i "s|__DB_TYPE__|$DB_TYPE|g" /root/marzneshin_backup.sh
 
         (crontab -l 2>/dev/null | grep -v "marzneshin_backup.sh"; echo "$CRON_TIME bash /root/marzneshin_backup.sh") | crontab -
-
         echo -e "\nStep 7 - Running first backup..."
         bash /root/marzneshin_backup.sh
-
         echo -e "\nBackup successfully sent"
-        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-             -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
 
-                     create_backup_script_x-ui "$DB_TYPE"
+#Marzban
+    elif [[ "$PANEL_TYPE" == "Marzban" ]]; then
+        MISSING_DIRS=()
+        [[ ! -d "/opt/marzban" ]]     && MISSING_DIRS+=("/opt/marzban")
+        [[ ! -d "/var/lib/marzban" ]] && MISSING_DIRS+=("/var/lib/marzban")
+        if (( ${#MISSING_DIRS[@]} > 0 )); then
+            echo
+            echo "========================================"
+            echo "   Marzban not detected on server"
+            echo "========================================"
+            echo "Missing required paths:"
+            for d in "${MISSING_DIRS[@]}"; do echo "  - $d"; done
+            echo
+            echo "Returning to main menu..."
+            read -p "Press Enter to continue..." _
+            return
+        fi
+
+        echo -e "\nStep 6 - Detecting Database Type (Marzban)"
+        DB_TYPE=$(detect_db_type_Marzban)
+        case $DB_TYPE in
+            sqlite)   echo "SQLite detected." ;;
+            mysql)    echo "MySQL detected." ;;
+            mariadb)  echo "MariaDB detected." ;;
+            *)        echo "DB type unknown/unsupported. Aborting."; return ;;
+        esac
+DB_LABEL="$DB_TYPE"
+if [[ "$DB_TYPE" == "mysql" || "$DB_TYPE" == "mariadb" ]]; then
+    DB_LABEL="Mysql/Maria"
+fi
+
+create_backup_script_Marzban "$DB_TYPE"
+sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" /root/marzban_backup.sh
+sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/marzban_backup.sh
+sed -i "s|__CAPTION__|$CAPTION|g" /root/marzban_backup.sh
+sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/marzban_backup.sh
+sed -i "s|__PANEL_NAME__|Marzban|g" /root/marzban_backup.sh
+sed -i "s|__DB_TYPE__|$DB_LABEL|g" /root/marzban_backup.sh
+
+        (crontab -l 2>/dev/null | grep -v "marzban_backup.sh"; echo "$CRON_TIME bash /root/marzban_backup.sh") | crontab -
+        echo -e "\nStep 7 - Running first backup..."
+        bash /root/marzban_backup.sh
+        echo -e "\nBackup successfully sent"
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
+
+    else  # X-ui
+        if [[ ! -d "/etc/x-ui" ]]; then
+            echo
+            echo "========================================"
+            echo "        X-ui not detected on server"
+            echo "========================================"
+            echo "Missing required path:"
+            echo "  - /etc/x-ui"
+            echo
+            echo "Returning to main menu..."
+            read -p "Press Enter to continue..." _
+            return
+        fi
+
+        echo -e "\nStep 6 - Creating X-ui backup script..."
+        DB_TYPE="sqlite"
+        create_backup_script_x_ui "$DB_TYPE"
         sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|g" /root/x-ui_backup.sh
         sed -i "s|__CHAT_ID__|$CHAT_ID|g" /root/x-ui_backup.sh
         sed -i "s|__CAPTION__|$CAPTION|g" /root/x-ui_backup.sh
         sed -i "s|__COMP_TYPE__|$COMP_TYPE|g" /root/x-ui_backup.sh
+        sed -i "s|__PANEL_NAME__|X-ui|g" /root/x-ui_backup.sh
 
         (crontab -l 2>/dev/null | grep -v "x-ui_backup.sh"; echo "$CRON_TIME bash /root/x-ui_backup.sh") | crontab -
         echo -e "\nStep 7 - Running first backup..."
         bash /root/x-ui_backup.sh
-        
         echo -e "\nBackup successfully sent"
-        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-             -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
-
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d text="Backuper installed and first backup sent." >/dev/null
     fi
 
     read -p "Press Enter to return to menu..."
 }
 
 # ----- Remove Backuper -----
-function remove_backuper() {
+remove_backuper() {
     clear
     echo "Removing Backuper..."
-    rm -f /root/marzneshin_backup.sh /root/pasarguard_backup.sh
-    rm -rf /root/backuper_marzneshin /root/backuper_pasarguard
-    crontab -l 2>/dev/null | grep -v 'marzneshin_backup.sh' | grep -v 'pasarguard_backup.sh' | crontab -
+    rm -f /root/marzneshin_backup.sh /root/pasarguard_backup.sh /root/marzban_backup.sh /root/x-ui_backup.sh
+    rm -rf /root/backuper_marzneshin /root/backuper_pasarguard /root/backuper_marzban /root/backuper_x-ui
+    crontab -l 2>/dev/null | grep -v 'marzneshin_backup.sh' | grep -v 'pasarguard_backup.sh' | grep -v 'marzban_backup.sh' | grep -v 'x-ui_backup.sh' | crontab -
     echo "Backuper removed successfully."
     read -p "Press Enter to return..."
 }
 
 # ----- Run Script Manually -----
-function run_script() {
+run_script() {
     clear
-    if [[ -f /root/marzneshin_backup.sh ]]; then
-        bash /root/marzneshin_backup.sh
-    elif [[ -f /root/pasarguard_backup.sh ]]; then
-        bash /root/pasarguard_backup.sh
+    if   [[ -f /root/marzban_backup.sh ]]; then bash /root/marzban_backup.sh
+    elif [[ -f /root/marzneshin_backup.sh ]]; then bash /root/marzneshin_backup.sh
+    elif [[ -f /root/pasarguard_backup.sh ]]; then bash /root/pasarguard_backup.sh
+    elif [[ -f /root/x-ui_backup.sh ]]; then bash /root/x-ui_backup.sh
     else
         echo "Backup script not found. Install first."
     fi
