@@ -28,11 +28,16 @@ ICON_INFO="${CYAN}ℹ${RESET}"
 ICON_WARN="${YELLOW}⚠${RESET}"
 ARROW="${CYAN}➜${RESET}"
 
+# Box drawing (UTF-8). If your terminal can't show them, replace with +-| characters.
+BOX_TL="╔"; BOX_TR="╗"; BOX_BL="╚"; BOX_BR="╝"
+BOX_H="═"; BOX_V="║"
+BOX_T="╠"; BOX_B="╣"
+
 WIDTH=41
 TITLE="Time Backup"
 LINE=$(printf '%*s' "$WIDTH" '' | tr ' ' '=')
 
-hr() { echo -e "${GRAY}$(printf '%*s' "${WIDTH:-41}" '' | tr ' ' '=')${RESET}"; }
+hr()  { echo -e "${GRAY}$(printf '%*s' "${WIDTH:-41}" '' | tr ' ' '=')${RESET}"; }
 hr2() { echo -e "${GRAY}$(printf '%*s' 41 '' | tr ' ' '-')${RESET}"; }
 
 center_text() {
@@ -1062,16 +1067,58 @@ transfer_backup() {
     menu_item 1 "Marzneshin"
     menu_item 2 "Pasarguard"
     menu_item 3 "X-ui"
+    menu_item 4 "Marzban"
     echo
     hr2
-    read -p "${ARROW} Choose (1-3): " PANEL_OPTION
+    read -p "${ARROW} Choose (1-4): " PANEL_OPTION
     case "$PANEL_OPTION" in
       1) PANEL_TYPE="Marzneshin"; break ;;
       2) PANEL_TYPE="Pasarguard"; break ;;
       3) PANEL_TYPE="X-ui"; break ;;
-      *) warn "Invalid choice. Please select 1, 2, or 3."; sleep 1 ;;
+      4) PANEL_TYPE="Marzban"; break ;;
+      *) warn "Invalid choice. Please select 1, 2, 3, or 4."; sleep 1 ;;
     esac
   done
+
+  # ==============================
+  # Local Pre-check (Server A)
+  # ==============================
+  PANEL_NAME="$PANEL_TYPE"
+
+  MISSING_DIRS=()
+  case "$PANEL_TYPE" in
+    "Marzneshin")
+      REQ_DIRS=( "/etc/opt/marzneshin" "/var/lib/marzneshin" "/var/lib/marznode" )
+      ;;
+    "Pasarguard")
+      REQ_DIRS=( "/opt/pasarguard" "/opt/pg-node" "/var/lib/pasarguard" "/var/lib/pg-node" )
+      ;;
+    "Marzban")
+      REQ_DIRS=( "/opt/marzban" "/var/lib/marzban" )
+      ;;
+    "X-ui")
+      REQ_DIRS=( "/etc/x-ui")
+      ;;
+  esac
+
+  for d in "${REQ_DIRS[@]}"; do
+    [[ -d "$d" ]] || MISSING_DIRS+=("$d")
+  done
+
+  if (( ${#MISSING_DIRS[@]} > 0 )); then
+    echo
+    echo "⛔ Preconditions not met — $PANEL_NAME"
+    echo "────────────────────────────────────────"
+    echo "Missing folders on Server A:"
+    for dir in "${MISSING_DIRS[@]}"; do
+      echo "  • $dir"
+    done
+    echo "────────────────────────────────────────"
+    echo "Fix: install/repair $PANEL_NAME on Server A, then retry."
+    echo
+    pause
+    return
+  fi
 
   clear
   echo -e "${BOLD}${BLUE}Enter Remote Server Details${RESET}\n"
@@ -1081,46 +1128,29 @@ transfer_backup() {
   read -s -p "${ARROW} Password Server [Client]: " REMOTE_PASS
   echo
 
-  INSTALL_XUI="N"
-  XUI_VARIANT="S"
-  if [[ "$PANEL_TYPE" == "X-ui" ]]; then
-    read -p "${ARROW} Install X-ui on remote? (Y/n) [default: N]: " INSTALL_XUI
-    INSTALL_XUI=${INSTALL_XUI^^}
-    [[ -z "$INSTALL_XUI" ]] && INSTALL_XUI="N"
-    if [[ "$INSTALL_XUI" == "Y" ]]; then
-      read -p "${ARROW} Choose X-ui variant: Sanaei or Alireza (S/A) [default: S]: " XUI_VARIANT
-      XUI_VARIANT=${XUI_VARIANT^^}
-      [[ -z "$XUI_VARIANT" ]] && XUI_VARIANT="S"
-      if [[ "$XUI_VARIANT" != "A" ]]; then XUI_VARIANT="S"; fi
-    fi
-  fi
+
+BACKUP_CLIENT_DB="N"
+if [[ "$PANEL_TYPE" =~ ^(Marzneshin|Marzban|Pasarguard)$ ]]; then
+  read -p "${ARROW} Backup database on Client before transfer? (y/N) [Client]: " BACKUP_CLIENT_DB
+  BACKUP_CLIENT_DB=${BACKUP_CLIENT_DB^^}
+  [[ -z "$BACKUP_CLIENT_DB" ]] && BACKUP_CLIENT_DB="N"
+  [[ "$BACKUP_CLIENT_DB" != "Y" ]] && BACKUP_CLIENT_DB="N"
+fi
+
 
   TRANSFER_SCRIPT=$(mktemp /tmp/Transfer_backup.XXXXXX.sh)
   trap 'rm -f "$TRANSFER_SCRIPT"' EXIT
 
+            #Marznesahin Transfor#
   if [[ "$PANEL_TYPE" == "Marzneshin" ]]; then
     PANEL_NAME="Marzneshin"
     BACKUP_DIR="/root/backuper_marzneshin"
     REMOTE_ETC="/etc/opt/marzneshin"
     REMOTE_NODE="/var/lib/marznode"
     REMOTE_MARZ="/var/lib/marzneshin"
-    REMOTE_DB="/root/Marzneshin-Mysql"
+    REMOTE_DB="/root/Marzneshin-DB"
     DB_ENABLED=0
-    DB_DIR_NAME="Marzneshin-Mysql"
-
-    MISSING_DIRS=()
-    [[ ! -d "/etc/opt/marzneshin" ]] && MISSING_DIRS+=("/etc/opt/marzneshin")
-    [[ ! -d "/var/lib/marzneshin" ]] && MISSING_DIRS+=("/var/lib/marzneshin")
-    [[ ! -d "/var/lib/marznode" ]] && MISSING_DIRS+=("/var/lib/marznode")
-    if [[ ${#MISSING_DIRS[@]} -gt 0 ]]; then
-      banner "CRITICAL ERROR"
-      echo -e "${RED}The following required directories are missing:${RESET}"
-      for dir in "${MISSING_DIRS[@]}"; do echo -e "  ${RED}-${RESET} $dir"; done
-      echo
-      warn "Please install Marzneshin properly before transferring."
-      pause
-      return
-    fi
+    DB_DIR_NAME="Marzneshin-DB"
 
     DB_TYPE=$(detect_db_type)
     case $DB_TYPE in
@@ -1138,8 +1168,8 @@ DB_PASS=$(grep 'MYSQL_ROOT_PASSWORD:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}
 DB_NAME=$(grep 'MYSQL_DATABASE:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
 DB_USER="root"
 if [ -n "$DB_PASS" ] && [ -n "$DB_NAME" ]; then
-    mkdir -p "$OUTPUT_DIR/Marzneshin-Mysql"
-    mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$OUTPUT_DIR/Marzneshin-Mysql/marzneshin_backup.sql" 2>/dev/null && \
+    mkdir -p "$OUTPUT_DIR/Marzneshin-DB"
+    mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$OUTPUT_DIR/Marzneshin-DB/marzneshin_backup.sql" 2>/dev/null && \
     echo "MySQL backup created." || echo "MySQL backup failed."
 else
     echo "MySQL credentials not found in docker-compose.yml"
@@ -1156,8 +1186,8 @@ DB_PASS=$(grep 'MARIADB_ROOT_PASSWORD:' "$DOCKER_COMPOSE" | awk -F': ' '{print $
 DB_NAME=$(grep 'MARIADB_DATABASE:' "$DOCKER_COMPOSE" | awk -F': ' '{print $2}' | tr -d ' "')
 DB_USER="root"
 if [ -n "$DB_PASS" ] && [ -n "$DB_NAME" ]; then
-    mkdir -p "$OUTPUT_DIR/Marzneshin-Mysql"
-    mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$OUTPUT_DIR/Marzneshin-Mysql/marzneshin_backup.sql" 2>/dev/null && \
+    mkdir -p "$OUTPUT_DIR/Marzneshin-DB"
+    mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$OUTPUT_DIR/Marzneshin-DB/marzneshin_backup.sql" 2>/dev/null && \
     echo "MariaDB backup created." || echo "MariaDB backup failed."
 else
     echo "MariaDB credentials not found in docker-compose.yml"
@@ -1173,6 +1203,9 @@ echo "Starting transfer backup ($PANEL_NAME)..."
 echo "Date: \$(date '+%Y-%m-%d %H:%M:%S')"
 echo "----------------------------------------"
 
+PANEL_NAME="$PANEL_NAME"
+DB_TYPE="$DB_TYPE"
+
 BACKUP_DIR="$BACKUP_DIR"
 REMOTE_IP="$REMOTE_IP"
 REMOTE_USER="$REMOTE_USER"
@@ -1183,43 +1216,321 @@ REMOTE_MARZ="$REMOTE_MARZ"
 REMOTE_DB="$REMOTE_DB"
 DB_ENABLED="$DB_ENABLED"
 DB_DIR_NAME="$DB_DIR_NAME"
+BACKUP_CLIENT_DB="$BACKUP_CLIENT_DB"
+
+# --- Normalize BACKUP_CLIENT_DB (y/yes => Y, anything else => N) ---
+BACKUP_CLIENT_DB=\$(echo "\${BACKUP_CLIENT_DB:-N}" | tr -d '[:space:]\\r' | tr '[:lower:]' '[:upper:]')
+[ "\$BACKUP_CLIENT_DB" = "YES" ] && BACKUP_CLIENT_DB="Y"
+[ "\$BACKUP_CLIENT_DB" = "NO" ] && BACKUP_CLIENT_DB="N"
+[ "\$BACKUP_CLIENT_DB" = "Y" ] || BACKUP_CLIENT_DB="N"
+# ---------------------------------------------------------------
+
+DO_DB_DUMP_TRANSFER="0"
+if [ "\$DB_ENABLED" = "1" ] && [ "\$BACKUP_CLIENT_DB" = "Y" ]; then
+  DO_DB_DUMP_TRANSFER="1"
+fi
+
+DATE=\$(date +"%Y-%m-%d_%H-%M-%S")
+OUTPUT_DIR="\$BACKUP_DIR/backup_\$DATE"
+mkdir -p "\$OUTPUT_DIR"
+
+echo "Copying local folders..."
+cp -r /etc/opt/marzneshin/ "\$OUTPUT_DIR/etc_opt/" 2>/dev/null
+cp -r /var/lib/marznode/ "\$OUTPUT_DIR/var_lib_marznode/" 2>/dev/null
+rsync -a /var/lib/marzneshin/ "\$OUTPUT_DIR/var_lib_marzneshin/" 2>/dev/null
+rsync -a /var/lib/marzneshin/mysql/ "\$OUTPUT_DIR/var_lib_marzneshin_mysql/" 2>/dev/null
+
+if [ "\$DO_DB_DUMP_TRANSFER" = "1" ]; then
+  echo "Creating DB dump on Source..."
+  DOCKER_COMPOSE="/etc/opt/marzneshin/docker-compose.yml"
+$DB_BACKUP_SCRIPT
+else
+  echo "DB dump on Source: Skipped (user chose N)"
+fi
+# ----------------------------------------------------
+
+echo "Installing sshpass if needed..."
+command -v sshpass &>/dev/null || { apt update && apt install -y sshpass; }
+
+# --- Optional: Backup current DB on Client (server B) before overwrite ---
+CLIENT_DB_BK_STATUS="Skipped"
+if [ "\$BACKUP_CLIENT_DB" = "Y" ]; then
+  echo "Creating DB backup on Client (before overwrite)..."
+
+  CLIENT_DB_BK_RAW=\$(
+    sshpass -p "\$REMOTE_PASS" ssh \
+      -o StrictHostKeyChecking=no \
+      -o ConnectTimeout=10 \
+      "\$REMOTE_USER@\${REMOTE_IP}" '
+        set +e
+TS=\$(date +"%Y-%m-%d_%H-%M-%S")
+        BK_DIR="/root/Client-DB-Backups"
+        COMPOSE="/etc/opt/marzneshin/docker-compose.yml"
+        mkdir -p "$BK_DIR"
+
+        [ -f "$COMPOSE" ] || { echo "SKIP:no-compose"; exit 0; }
+
+PASS=\$(grep -E "MARIADB_ROOT_PASSWORD:|MYSQL_ROOT_PASSWORD:" "\$COMPOSE" | head -n1 | awk -F": " "{print \$2}" | tr -d " \"\r")
+DB=\$(grep -E "MARIADB_DATABASE:|MYSQL_DATABASE:" "\$COMPOSE" | head -n1 | awk -F": " "{print \$2}" | tr -d " \"\r")
+
+        [ -n "$PASS" ] && [ -n "$DB" ] || { echo "SKIP:no-creds"; exit 0; }
+
+OUT="\$BK_DIR/marzneshin_client_\${TS}.sql"
+mysqldump -h 127.0.0.1 -P 3306 -u root -p"\$PASS" "\$DB" > "\$OUT" 2>/dev/null
+          && echo "OK" || echo "FAIL"
+      ' 2>/dev/null | tail -n1
+  )
+
+  case "\$CLIENT_DB_BK_RAW" in
+    OK)     CLIENT_DB_BK_STATUS="Created" ;;
+    SKIP:*) CLIENT_DB_BK_STATUS="Skipped" ;;
+    *)      CLIENT_DB_BK_STATUS="Failed" ;;
+  esac
+fi
+# ----------------------------------------------------------------------
+
+echo "Cleaning remote server..."
+SSH_ERR_FILE=\$(mktemp)
+
+sshpass -p "\$REMOTE_PASS" ssh \
+  -o StrictHostKeyChecking=no \
+  -o ConnectTimeout=10 \
+  "\$REMOTE_USER@\${REMOTE_IP}" "
+    echo 'Removing old data...'
+    rm -rf '\$REMOTE_ETC' '\$REMOTE_NODE' '\$REMOTE_MARZ'
+    mkdir -p '\$REMOTE_ETC' '\$REMOTE_NODE' '\$REMOTE_MARZ' '\$REMOTE_MARZ/mysql'
+
+    if [ '\$DO_DB_DUMP_TRANSFER' = '1' ]; then
+      rm -rf '\$REMOTE_DB'
+      mkdir -p '\$REMOTE_DB'
+    fi
+" 2>"\$SSH_ERR_FILE"
+SSH_RC=\$?
+
+if [ "\$SSH_RC" -ne 0 ]; then
+  NOW=\$(date '+%Y-%m-%d %H:%M:%S')
+  DEST="\${REMOTE_USER}@\${REMOTE_IP}"
+  ERR_LAST=\$(tail -n 3 "\$SSH_ERR_FILE" | tr -d '\r' | sed 's/[[:space:]]\\+/ /g')
+
+  if [ "\$DB_ENABLED" = "1" ]; then
+    DB_TEXT="Enabled (\$DB_TYPE)"
+  else
+    DB_TEXT="Disabled (SQLite/files)"
+  fi
+
+  echo
+  echo "❌ Transfer Report — \$PANEL_NAME"
+  echo "────────────────────────────────────────"
+  echo "➜ Destination : \$DEST"
+  echo "➜ Date        : \$NOW"
+  echo "➜ Database    : \$DB_TEXT"
+  echo "➜ Client DB bk: \$CLIENT_DB_BK_STATUS"
+  echo "➜ DB dump xfer : \$([ "\$DO_DB_DUMP_TRANSFER" = "1" ] && echo Enabled || echo Skipped)"
+  echo "➜ Restart     : Not attempted"
+  echo "────────────────────────────────────────"
+  echo "⚠️ Connection Error"
+  echo " • Step      : SSH connect / clean remote"
+  echo " • Exit code : \$SSH_RC"
+  [ -n "\$ERR_LAST" ] && echo " • Details   : \$ERR_LAST"
+  echo "────────────────────────────────────────"
+  echo "Tip: Check IP/User/Password, SSH port 22, firewall, and sshd status."
+  echo
+
+  rm -f "\$SSH_ERR_FILE"
+  exit 1
+fi
+
+rm -f "\$SSH_ERR_FILE"
+echo "Remote cleanup done."
+
+echo "Transferring data to \$REMOTE_IP..."
+sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/etc_opt/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_ETC/" && echo "etc_opt transferred"
+sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marznode/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_NODE/" && echo "var_lib_marznode transferred"
+sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marzneshin/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_MARZ/" && echo "var_lib_marzneshin transferred"
+sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marzneshin_mysql/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_MARZ/mysql/" && echo "mysql subdir transferred"
+
+if [ "\$DO_DB_DUMP_TRANSFER" = "1" ] && [ -d "\$OUTPUT_DIR/\$DB_DIR_NAME" ]; then
+  sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/\$DB_DIR_NAME/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_DB/" && echo "Database dump transferred"
+else
+  echo "Database dump transfer: Skipped"
+fi
+
+echo "Restarting Marzneshin on remote (detached)..."
+sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\${REMOTE_IP}" \
+  "nohup marzneshin restart >/tmp/marzneshin_restart.log 2>&1 < /dev/null & disown; echo RESTART_TRIGGERED"
+RESTART_RC=\$?
+
+NOW=\$(date '+%Y-%m-%d %H:%M:%S')
+DEST="\${REMOTE_USER}@\${REMOTE_IP}"
+
+if [ "\$DB_ENABLED" = "1" ]; then
+  DB_TEXT="Enabled (\$DB_TYPE)"
+else
+  DB_TEXT="Disabled (SQLite/files)"
+fi
+
+RESTART_TEXT="Failed"
+[ "\$RESTART_RC" -eq 0 ] && RESTART_TEXT="Triggered"
+
+echo
+echo "✅ Transfer Report — \$PANEL_NAME"
+echo "────────────────────────────────────────"
+echo "➜ Destination : \$DEST"
+echo "➜ Date        : \$NOW"
+echo "➜ Database    : \$DB_TEXT"
+echo "➜ Client DB bk: \$CLIENT_DB_BK_STATUS"
+echo "➜ DB dump xfer : \$([ "\$DO_DB_DUMP_TRANSFER" = "1" ] && echo Enabled || echo Skipped)"
+echo "➜ Restart     : \$RESTART_TEXT"
+echo "────────────────────────────────────────"
+echo "📁 Paths"
+echo " • /etc/opt/marzneshin        → \$REMOTE_ETC"
+echo " • /var/lib/marznode          → \$REMOTE_NODE"
+echo " • /var/lib/marzneshin        → \$REMOTE_MARZ"
+echo " • /var/lib/marzneshin/mysql  → \$REMOTE_MARZ/mysql"
+if [ "\$DO_DB_DUMP_TRANSFER" = "1" ]; then
+  echo " • DB dump folder             → \$REMOTE_DB"
+fi
+echo
+
+echo "Cleaning local backup..."
+rm -rf "\$BACKUP_DIR"
+EOF
+  
+     #Marzaban Transfor#
+  elif [[ "$PANEL_TYPE" == "Marzban" ]]; then
+    PANEL_NAME="Marzban"
+    BACKUP_DIR="/root/backuper_marzban"
+    REMOTE_OPT="/opt/marzban"
+    REMOTE_LIB="/var/lib/marzban"
+    REMOTE_DB="/root/Marzban-DB"
+    DB_ENABLED=0
+    DB_DIR_NAME="Marzban-DB"
+
+    DB_TYPE=$(detect_db_type_Marzban)
+    case $DB_TYPE in
+      sqlite)
+        info "Database: SQLite (files included in /var/lib/marzban)"
+        DB_BACKUP_SCRIPT=""
+        DB_ENABLED=0
+        ;;
+      mysql|mariadb)
+        info "Database: MySQL/MariaDB"
+        DB_ENABLED=1
+        DB_BACKUP_SCRIPT=$(cat <<'EOF'
+ENV_FILE="/opt/marzban/.env"
+DB_NAME="marzban"
+DB_USER="marzban"
+DB_PASS=$(grep -E '^[[:space:]]*MYSQL_PASSWORD[[:space:]]*=' "$ENV_FILE" | tail -n1 | sed -E 's/^[[:space:]]*MYSQL_PASSWORD[[:space:]]*=[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/' | tr -d "'")
+if [ -n "$DB_PASS" ]; then
+    mkdir -p "$OUTPUT_DIR/Marzban-DB"
+    mysqldump -h 127.0.0.1 -P 3306 -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$OUTPUT_DIR/Marzban-DB/marzban_backup.sql" 2>/dev/null && \
+    echo "MySQL/MariaDB backup created." || echo "MySQL/MariaDB backup failed."
+else
+    echo "MYSQL_PASSWORD not found in .env"
+fi
+EOF
+)
+        ;;
+      *)
+        warn "Database: unknown/unsupported. Skipping DB dump."
+        DB_BACKUP_SCRIPT=""
+        DB_ENABLED=0
+        ;;
+    esac
+
+    cat > "$TRANSFER_SCRIPT" <<EOF
+#!/bin/bash
+echo "Starting transfer backup ($PANEL_NAME)..."
+echo "Date: \$(date '+%Y-%m-%d %H:%M:%S')"
+echo "----------------------------------------"
+
+BACKUP_DIR="$BACKUP_DIR"
+REMOTE_IP="$REMOTE_IP"
+REMOTE_USER="$REMOTE_USER"
+REMOTE_PASS="$REMOTE_PASS"
+REMOTE_OPT="$REMOTE_OPT"
+REMOTE_LIB="$REMOTE_LIB"
+REMOTE_DB="$REMOTE_DB"
+DB_ENABLED="$DB_ENABLED"
+DB_DIR_NAME="$DB_DIR_NAME"
+BACKUP_CLIENT_DB="$BACKUP_CLIENT_DB"
+
 DATE=\$(date +"%Y-%m-%d_%H-%M-%S")
 OUTPUT_DIR="\$BACKUP_DIR/backup_\$DATE"
 
 mkdir -p "\$OUTPUT_DIR"
 
 echo "Copying local folders..."
-cp -r /etc/opt/marzneshin/ "\$OUTPUT_DIR/etc_opt/" 2>/dev/null
-cp -r /var/lib/marznode/ "\$OUTPUT_DIR/var_lib_marznode/" 2>/dev/null
-rsync -a --exclude='mysql' /var/lib/marzneshin/ "\$OUTPUT_DIR/var_lib_marzneshin/" 2>/dev/null
+rsync -a /opt/marzban/ "\$OUTPUT_DIR/opt_marzban/" 2>/dev/null
+rsync -a /var/lib/marzban/ "\$OUTPUT_DIR/var_lib_marzban/" 2>/dev/null
 
-DOCKER_COMPOSE="/etc/opt/marzneshin/docker-compose.yml"
 $DB_BACKUP_SCRIPT
 
 echo "Installing sshpass if needed..."
 command -v sshpass &>/dev/null || apt update && apt install -y sshpass
 
 echo "Cleaning remote server..."
-sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\${REMOTE_IP}" "
+
+SSH_ERR_FILE=\$(mktemp)
+
+sshpass -p "\$REMOTE_PASS" ssh \
+  -o StrictHostKeyChecking=no \
+  -o ConnectTimeout=10 \
+  "\$REMOTE_USER@\${REMOTE_IP}" "
     echo 'Removing old data...'
-    rm -rf '\$REMOTE_ETC' '\$REMOTE_NODE' '\$REMOTE_MARZ'
-    mkdir -p '\$REMOTE_ETC' '\$REMOTE_NODE' '\$REMOTE_MARZ'
+    rm -rf '\$REMOTE_OPT' '\$REMOTE_LIB'
+    mkdir -p '\$REMOTE_OPT' '\$REMOTE_LIB'
     if [ \"\$DB_ENABLED\" = \"1\" ]; then
         rm -rf '\$REMOTE_DB'
         mkdir -p '\$REMOTE_DB'
     fi
-" || { echo "Failed to connect to remote server!"; exit 1; }
+" 2>\"\$SSH_ERR_FILE\"
+SSH_RC=\$?
+
+if [ \"\$SSH_RC\" -ne 0 ]; then
+  NOW=\$(date '+%Y-%m-%d %H:%M:%S')
+  DEST=\"\${REMOTE_USER}@\${REMOTE_IP}\"
+
+  if [ \"\$DB_ENABLED\" = \"1\" ]; then
+    DB_TEXT=\"Enabled (\$DB_TYPE)\"
+  else
+    DB_TEXT=\"Disabled (SQLite/files)\"
+  fi
+
+  ERR_LAST=\$(tail -n 3 \"\$SSH_ERR_FILE\" | tr -d '\r' | sed 's/[[:space:]]\\+/ /g')
+
+  echo
+  echo \"❌ Transfer Report — Marzban\"
+  echo \"────────────────────────────────────────\"
+  echo \"➜ Destination : \$DEST\"
+  echo \"➜ Date        : \$NOW\"
+  echo \"➜ Database    : \$DB_TEXT\"
+  echo \"➜ Restart     : Not attempted\"
+  echo \"────────────────────────────────────────\"
+  echo \"⚠️ Connection Error\"
+  echo \" • Step      : SSH connect / clean remote\"
+  echo \" • Exit code : \$SSH_RC\"
+  [ -n \"\$ERR_LAST\" ] && echo \" • Details   : \$ERR_LAST\"
+  echo \"────────────────────────────────────────\"
+  echo \"Tip: Check IP/User/Password, SSH port 22, firewall, and sshd status.\"
+  echo
+
+  rm -f \"\$SSH_ERR_FILE\"
+  exit 1
+fi
+
+rm -f \"\$SSH_ERR_FILE\"
+echo \"Remote cleanup done.\"
 
 echo "Transferring data to \$REMOTE_IP..."
-sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/etc_opt/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_ETC/" && echo "etc_opt transferred"
-sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marznode/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_NODE/" && echo "var_lib_marznode transferred"
-sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marzneshin/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_MARZ/" && echo "var_lib_marzneshin transferred"
+sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/opt_marzban/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_OPT/" && echo "opt_marzban transferred"
+sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marzban/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_LIB/" && echo "var_lib_marzban transferred"
 if [ "\$DB_ENABLED" = "1" ] && [ -d "\$OUTPUT_DIR/\$DB_DIR_NAME" ]; then
     sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/\$DB_DIR_NAME/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_DB/" && echo "Database transferred"
 fi
 
-echo "Restarting Marzneshin on remote..."
-sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\${REMOTE_IP}" "marzneshin restart" && echo "Restart successful" || echo "Restart failed"
+echo "Restarting Marzban on remote..."
+sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\${REMOTE_IP}" "marzban restart" && echo "Restart successful" || echo "Restart failed"
 
 echo "Cleaning local backup..."
 rm -rf "\$BACKUP_DIR"
@@ -1240,21 +1551,6 @@ EOF
     REMOTE_DB="/root/Pasarguard-DB"
     DB_ENABLED=0
     DB_DIR_NAME="Pasarguard-DB"
-
-    MISSING_DIRS=()
-    [[ ! -d "/opt/pasarguard" ]] && MISSING_DIRS+=("/opt/pasarguard")
-    [[ ! -d "/opt/pg-node" ]] && MISSING_DIRS+=("/opt/pg-node")
-    [[ ! -d "/var/lib/pasarguard" ]] && MISSING_DIRS+=("/var/lib/pasarguard")
-    [[ ! -d "/var/lib/pg-node" ]] && MISSING_DIRS+=("/var/lib/pg-node")
-    if [[ ${#MISSING_DIRS[@]} -gt 0 ]]; then
-      banner "CRITICAL ERROR"
-      echo -e "${RED}The following required directories are missing:${RESET}"
-      for dir in "${MISSING_DIRS[@]}"; do echo -e "  ${RED}-${RESET} $dir"; done
-      echo
-      warn "Please install Pasarguard properly before transferring."
-      pause
-      return
-    fi
 
     DB_TYPE=$(detect_db_type_pasarguard)
     case $DB_TYPE in
@@ -1365,6 +1661,8 @@ REMOTE_LIB_PG="$REMOTE_LIB_PG"
 REMOTE_DB="$REMOTE_DB"
 DB_ENABLED="$DB_ENABLED"
 DB_DIR_NAME="$DB_DIR_NAME"
+BACKUP_CLIENT_DB="$BACKUP_CLIENT_DB"
+
 DATE=\$(date +"%Y-%m-%d_%H-%M-%S")
 OUTPUT_DIR="\$BACKUP_DIR/backup_\$DATE"
 
@@ -1382,7 +1680,13 @@ echo "Installing sshpass if needed..."
 command -v sshpass &>/dev/null || apt update && apt install -y sshpass
 
 echo "Cleaning remote server..."
-sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\${REMOTE_IP}" "
+
+SSH_ERR_FILE=\$(mktemp)
+
+sshpass -p "\$REMOTE_PASS" ssh \
+  -o StrictHostKeyChecking=no \
+  -o ConnectTimeout=10 \
+  "\$REMOTE_USER@\${REMOTE_IP}" "
     echo 'Removing old data...'
     rm -rf '\$REMOTE_PAS' '\$REMOTE_PG_NODE' '\$REMOTE_LIB_PAS' '\$REMOTE_LIB_PG'
     mkdir -p '\$REMOTE_PAS' '\$REMOTE_PG_NODE' '\$REMOTE_LIB_PAS' '\$REMOTE_LIB_PG'
@@ -1390,7 +1694,43 @@ sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\${REM
         rm -rf '\$REMOTE_DB'
         mkdir -p '\$REMOTE_DB'
     fi
-" || { echo "Failed to connect to remote server!"; exit 1; }
+" 2>\"\$SSH_ERR_FILE\"
+SSH_RC=\$?
+
+if [ \"\$SSH_RC\" -ne 0 ]; then
+  NOW=\$(date '+%Y-%m-%d %H:%M:%S')
+  DEST=\"\${REMOTE_USER}@\${REMOTE_IP}\"
+
+  if [ \"\$DB_ENABLED\" = \"1\" ]; then
+    DB_TEXT=\"Enabled (\$DB_TYPE)\"
+  else
+    DB_TEXT=\"Disabled (SQLite/files)\"
+  fi
+
+  ERR_LAST=\$(tail -n 3 \"\$SSH_ERR_FILE\" | tr -d '\r' | sed 's/[[:space:]]\\+/ /g')
+
+  echo
+  echo \"❌ Transfer Report — Pasarguard\"
+  echo \"────────────────────────────────────────\"
+  echo \"➜ Destination : \$DEST\"
+  echo \"➜ Date        : \$NOW\"
+  echo \"➜ Database    : \$DB_TEXT\"
+  echo \"➜ Restart     : Not attempted\"
+  echo \"────────────────────────────────────────\"
+  echo \"⚠️ Connection Error\"
+  echo \" • Step      : SSH connect / clean remote\"
+  echo \" • Exit code : \$SSH_RC\"
+  [ -n \"\$ERR_LAST\" ] && echo \" • Details   : \$ERR_LAST\"
+  echo \"────────────────────────────────────────\"
+  echo \"Tip: Check IP/User/Password, SSH port 22, firewall, and sshd status.\"
+  echo
+
+  rm -f \"\$SSH_ERR_FILE\"
+  exit 1
+fi
+
+rm -f \"\$SSH_ERR_FILE\"
+echo \"Remote cleanup done.\"
 
 echo "Transferring data to \$REMOTE_IP..."
 sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/opt_pasarguard/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_PAS/" && echo "opt_pasarguard transferred"
@@ -1418,17 +1758,16 @@ EOF
     REMOTE_ETC="/etc/x-ui"
     REMOTE_CERT="/root/cert"
 
-    MISSING_DIRS=()
-    [[ ! -d "/etc/x-ui" ]] && MISSING_DIRS+=("/etc/x-ui")
-    [[ ! -d "/root/cert/" ]] && MISSING_DIRS+=("/root/cert/")
-    if [[ ${#MISSING_DIRS[@]} -gt 0 ]]; then
-      banner "CRITICAL ERROR"
-      echo -e "${RED}The following required directories are missing:${RESET}"
-      for dir in "${MISSING_DIRS[@]}"; do echo -e "  ${RED}-${RESET} $dir"; done
-      echo
-      warn "Please install X-ui properly before transferring."
-      pause
-      return
+    INSTALL_XUI="N"
+    XUI_VARIANT="S"
+    read -p "${ARROW} Install X-ui on remote? (Y/n) [default: N]: " INSTALL_XUI
+    INSTALL_XUI=${INSTALL_XUI^^}
+    [[ -z "$INSTALL_XUI" ]] && INSTALL_XUI="N"
+    if [[ "$INSTALL_XUI" == "Y" ]]; then
+      read -p "${ARROW} Choose X-ui variant: Sanaei or Alireza (S/A) [default: S]: " XUI_VARIANT
+      XUI_VARIANT=${XUI_VARIANT^^}
+      [[ -z "$XUI_VARIANT" ]] && XUI_VARIANT="S"
+      [[ "$XUI_VARIANT" != "A" ]] && XUI_VARIANT="S"
     fi
 
     cat > "$TRANSFER_SCRIPT" <<EOF
@@ -1467,10 +1806,46 @@ if [ "\$INSTALL_XUI" = "Y" ]; then
 fi
 
 echo "Cleaning remote server..."
-sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\${REMOTE_IP}" "
+echo "Cleaning remote server..."
+
+SSH_ERR_FILE=\$(mktemp)
+
+sshpass -p "\$REMOTE_PASS" ssh \
+  -o StrictHostKeyChecking=no \
+  -o ConnectTimeout=10 \
+  "\$REMOTE_USER@\${REMOTE_IP}" "
     rm -rf '\$REMOTE_ETC' '\$REMOTE_CERT'
     mkdir -p '\$REMOTE_ETC' '\$REMOTE_CERT'
-" || { echo "Failed to connect to remote server!"; exit 1; }
+" 2>\"\$SSH_ERR_FILE\"
+SSH_RC=\$?
+
+if [ \"\$SSH_RC\" -ne 0 ]; then
+  NOW=\$(date '+%Y-%m-%d %H:%M:%S')
+  DEST=\"\${REMOTE_USER}@\${REMOTE_IP}\"
+  ERR_LAST=\$(tail -n 3 \"\$SSH_ERR_FILE\" | tr -d '\r' | sed 's/[[:space:]]\\+/ /g')
+
+  echo
+  echo \"❌ Transfer Report — X-ui\"
+  echo \"────────────────────────────────────────\"
+  echo \"➜ Destination : \$DEST\"
+  echo \"➜ Date        : \$NOW\"
+  echo \"➜ Database    : N/A\"
+  echo \"➜ Restart     : Not attempted\"
+  echo \"────────────────────────────────────────\"
+  echo \"⚠️ Connection Error\"
+  echo \" • Step      : SSH connect / clean remote\"
+  echo \" • Exit code : \$SSH_RC\"
+  [ -n \"\$ERR_LAST\" ] && echo \" • Details   : \$ERR_LAST\"
+  echo \"────────────────────────────────────────\"
+  echo \"Tip: Check IP/User/Password, SSH port 22, firewall, and sshd status.\"
+  echo
+
+  rm -f \"\$SSH_ERR_FILE\"
+  exit 1
+fi
+
+rm -f \"\$SSH_ERR_FILE\"
+echo \"Remote cleanup done.\"
 
 echo "Transferring data to \$REMOTE_IP..."
 sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/etc_x-ui/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_ETC/" && echo "etc_x-ui transferred"
