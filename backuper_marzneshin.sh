@@ -1252,42 +1252,6 @@ fi
 echo "Installing sshpass if needed..."
 command -v sshpass &>/dev/null || { apt update && apt install -y sshpass; }
 
-# --- Optional: Backup current DB on Client (server B) before overwrite ---
-CLIENT_DB_BK_STATUS="Skipped"
-if [ "\$BACKUP_CLIENT_DB" = "Y" ]; then
-  echo "Creating DB backup on Client (before overwrite)..."
-
-  CLIENT_DB_BK_RAW=\$(
-    sshpass -p "\$REMOTE_PASS" ssh \
-      -o StrictHostKeyChecking=no \
-      -o ConnectTimeout=10 \
-      "\$REMOTE_USER@\${REMOTE_IP}" '
-        set +e
-TS=\$(date +"%Y-%m-%d_%H-%M-%S")
-        BK_DIR="/root/Client-DB-Backups"
-        COMPOSE="/etc/opt/marzneshin/docker-compose.yml"
-        mkdir -p "$BK_DIR"
-
-        [ -f "$COMPOSE" ] || { echo "SKIP:no-compose"; exit 0; }
-
-PASS=\$(grep -E "MARIADB_ROOT_PASSWORD:|MYSQL_ROOT_PASSWORD:" "\$COMPOSE" | head -n1 | awk -F": " "{print \$2}" | tr -d " \"\r")
-DB=\$(grep -E "MARIADB_DATABASE:|MYSQL_DATABASE:" "\$COMPOSE" | head -n1 | awk -F": " "{print \$2}" | tr -d " \"\r")
-
-        [ -n "$PASS" ] && [ -n "$DB" ] || { echo "SKIP:no-creds"; exit 0; }
-
-OUT="\$BK_DIR/marzneshin_client_\${TS}.sql"
-mysqldump -h 127.0.0.1 -P 3306 -u root -p"\$PASS" "\$DB" > "\$OUT" 2>/dev/null
-          && echo "OK" || echo "FAIL"
-      ' 2>/dev/null | tail -n1
-  )
-
-  case "\$CLIENT_DB_BK_RAW" in
-    OK)     CLIENT_DB_BK_STATUS="Created" ;;
-    SKIP:*) CLIENT_DB_BK_STATUS="Skipped" ;;
-    *)      CLIENT_DB_BK_STATUS="Failed" ;;
-  esac
-fi
-# ----------------------------------------------------------------------
 
 echo "Cleaning remote server..."
 SSH_ERR_FILE=\$(mktemp)
@@ -1324,7 +1288,6 @@ if [ "\$SSH_RC" -ne 0 ]; then
   echo "➜ Destination : \$DEST"
   echo "➜ Date        : \$NOW"
   echo "➜ Database    : \$DB_TEXT"
-  echo "➜ Client DB bk: \$CLIENT_DB_BK_STATUS"
   echo "➜ DB dump xfer : \$([ "\$DO_DB_DUMP_TRANSFER" = "1" ] && echo Enabled || echo Skipped)"
   echo "➜ Restart     : Not attempted"
   echo "────────────────────────────────────────"
@@ -1378,7 +1341,6 @@ echo "────────────────────────�
 echo "➜ Destination : \$DEST"
 echo "➜ Date        : \$NOW"
 echo "➜ Database    : \$DB_TEXT"
-echo "➜ Client DB bk: \$CLIENT_DB_BK_STATUS"
 echo "➜ DB dump xfer : \$([ "\$DO_DB_DUMP_TRANSFER" = "1" ] && echo Enabled || echo Skipped)"
 echo "➜ Restart     : \$RESTART_TEXT"
 echo "────────────────────────────────────────"
@@ -1541,114 +1503,154 @@ echo "       Date: \$(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================"
 EOF
 
-  elif [[ "$PANEL_TYPE" == "Pasarguard" ]]; then
-    PANEL_NAME="Pasarguard"
-    BACKUP_DIR="/root/backuper_pasarguard"
-    REMOTE_PAS="/opt/pasarguard"
-    REMOTE_PG_NODE="/opt/pg-node"
-    REMOTE_LIB_PAS="/var/lib/pasarguard"
-    REMOTE_LIB_PG="/var/lib/pg-node"
-    REMOTE_DB="/root/Pasarguard-DB"
-    DB_ENABLED=0
-    DB_DIR_NAME="Pasarguard-DB"
+           ##Pasarguard##
+elif [[ "$PANEL_TYPE" == "Pasarguard" ]]; then
+  PANEL_NAME="Pasarguard"
+  BACKUP_DIR="/root/backuper_pasarguard"
 
-    DB_TYPE=$(detect_db_type_pasarguard)
-    case $DB_TYPE in
-      sqlite)
-        info "Database: SQLite (files included in copied folders)"
-        DB_BACKUP_SCRIPT=""
-        DB_ENABLED=0
-        ;;
-      mysql|mariadb)
-        info "Database: MariaDB/MySQL"
-        DB_ENABLED=1
-        DB_BACKUP_SCRIPT=$(cat <<'EOF'
+  REMOTE_PAS="/opt/pasarguard"
+  REMOTE_PG_NODE="/opt/pg-node"
+  REMOTE_LIB_PAS="/var/lib/pasarguard"
+  REMOTE_LIB_PG="/var/lib/pg-node"
+  REMOTE_LIB_MYSQL="/var/lib/mysql/pasarguard"
+  REMOTE_LIB_PGSQL="/var/lib/postgresql"
+  REMOTE_DB="/root/Pasarguard-DB"
+  
+
+  DB_ENABLED=0
+  DB_DIR_NAME="Pasarguard-DB"
+
+  DB_TYPE=$(detect_db_type_pasarguard)
+  case $DB_TYPE in
+    sqlite)
+      info "Database: SQLite (files included in copied folders)"
+      DB_BACKUP_SCRIPT=""
+      DB_ENABLED=0
+      ;;
+
+    mysql|mariadb)
+      info "Database: MariaDB/MySQL"
+      DB_ENABLED=1
+      DB_BACKUP_SCRIPT=$(cat <<'EOF'
 ENV_FILE="/opt/pasarguard/.env"
+
 parse_db_url() {
-    local url="$1"
-    url="${url#*://}"
-    local creds="${url%%@*}"
-    local hostdb="${url#*@}"
-    local user="${creds%%:*}"
-    local pass="${creds#*:}"; pass="${pass%%@*}"
-    local hostport="${hostdb%%/*}"
-    local dbname="${hostdb#*/}"
-    local host="${hostport%%:*}"
-    local port="${hostport##*:}"
-    echo "$user" "$pass" "$host" "$port" "$dbname"
+  local url="$1"
+  url="${url#*://}"
+  local creds="${url%%@*}"
+  local hostdb="${url#*@}"
+
+  local user="${creds%%:*}"
+  local pass="${creds#*:}"
+
+  local hostport="${hostdb%%/*}"
+  local dbname="${hostdb#*/}"
+
+  local host="" port=""
+  if [[ "$hostport" == *:* ]]; then
+    host="${hostport%%:*}"
+    port="${hostport##*:}"
+  else
+    host="$hostport"
+    port=""
+  fi
+
+  echo "$user" "$pass" "$host" "$port" "$dbname"
 }
+
 if [ -f "$ENV_FILE" ]; then
-    DB_URL=$(grep -E '^SQLALCHEMY_DATABASE_URL=' "$ENV_FILE" | tail -n1 | cut -d'=' -f2- | tr -d "\"'" | xargs)
-    if [ -n "$DB_URL" ]; then
-        read DB_USER DB_PASS DB_HOST DB_PORT DB_NAME < <(parse_db_url "$DB_URL")
-        : "${DB_USER:=pasarguard}"
-        : "${DB_NAME:=pasarguard}"
-        : "${DB_PORT:=3306}"
-        echo "Backing up MariaDB/MySQL database..."
-        mkdir -p "$OUTPUT_DIR/Pasarguard-DB"
-        mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" \
-            --single-transaction --routines --triggers --events --skip-lock-tables \
-            "$DB_NAME" > "$OUTPUT_DIR/Pasarguard-DB/pasarguard_backup.sql" 2>/dev/null && \
-            echo "MariaDB/MySQL backup created." || echo "MariaDB/MySQL backup failed."
-    else
-        echo "SQLALCHEMY_DATABASE_URL not found in .env"
-    fi
+  DB_URL=$(grep -E '^SQLALCHEMY_DATABASE_URL=' "$ENV_FILE" | tail -n1 | cut -d'=' -f2- | tr -d "\"'" | xargs)
+  if [ -n "$DB_URL" ]; then
+    read DB_USER DB_PASS DB_HOST DB_PORT DB_NAME < <(parse_db_url "$DB_URL")
+    : "${DB_USER:=pasarguard}"
+    : "${DB_NAME:=pasarguard}"
+    : "${DB_PORT:=3306}"
+
+    echo "Backing up MariaDB/MySQL database..."
+    mkdir -p "$OUTPUT_DIR/Pasarguard-DB"
+    mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" \
+      --single-transaction --routines --triggers --events --skip-lock-tables \
+      "$DB_NAME" > "$OUTPUT_DIR/Pasarguard-DB/pasarguard_backup.sql" 2>/dev/null \
+      && echo "MariaDB/MySQL backup created." || echo "MariaDB/MySQL backup failed."
+  else
+    echo "SQLALCHEMY_DATABASE_URL not found in .env"
+  fi
 else
-    echo ".env not found for Pasarguard"
+  echo ".env not found for Pasarguard"
 fi
 EOF
 )
-        ;;
-      postgresql)
-        info "Database: PostgreSQL"
-        DB_ENABLED=1
-        DB_BACKUP_SCRIPT=$(cat <<'EOF'
+      ;;
+
+    postgresql)
+      info "Database: PostgreSQL"
+      DB_ENABLED=1
+      DB_BACKUP_SCRIPT=$(cat <<'EOF'
 ENV_FILE="/opt/pasarguard/.env"
+
 parse_db_url() {
-    local url="$1"
-    url="${url#*://}"
-    local creds="${url%%@*}"
-    local hostdb="${url#*@}"
-    local user="${creds%%:*}"
-    local pass="${creds#*:}"; pass="${pass%%@*}"
-    local hostport="${hostdb%%/*}"
-    local dbname="${hostdb#*/}"
-    local host="${hostport%%:*}"
-    local port="${hostport##*:}"
-    echo "$user" "$pass" "$host" "$port" "$dbname"
+  local url="$1"
+  url="${url#*://}"
+  local creds="${url%%@*}"
+  local hostdb="${url#*@}"
+
+  local user="${creds%%:*}"
+  local pass="${creds#*:}"
+
+  local hostport="${hostdb%%/*}"
+  local dbname="${hostdb#*/}"
+
+  local host="" port=""
+  if [[ "$hostport" == *:* ]]; then
+    host="${hostport%%:*}"
+    port="${hostport##*:}"
+  else
+    host="$hostport"
+    port=""
+  fi
+
+  echo "$user" "$pass" "$host" "$port" "$dbname"
 }
+
 if [ -f "$ENV_FILE" ]; then
-    DB_URL=$(grep -E '^SQLALCHEMY_DATABASE_URL=' "$ENV_FILE" | tail -n1 | cut -d'=' -f2- | tr -d "\"'" | xargs)
-    if [ -n "$DB_URL" ]; then
-        read DB_USER DB_PASS DB_HOST DB_PORT DB_NAME < <(parse_db_url "$DB_URL")
-        : "${DB_USER:=pasarguard}"
-        : "${DB_NAME:=pasarguard}"
-        : "${DB_PORT:=5432}"
-        echo "Backing up PostgreSQL database..."
-        mkdir -p "$OUTPUT_DIR/Pasarguard-DB"
-        PGPASSWORD="$DB_PASS" pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -F c "$DB_NAME" > "$OUTPUT_DIR/Pasarguard-DB/pasarguard_backup.dump" 2>/dev/null && \
-            echo "PostgreSQL backup created." || echo "PostgreSQL backup failed."
-    else
-        echo "SQLALCHEMY_DATABASE_URL not found in .env"
-    fi
+  DB_URL=$(grep -E '^SQLALCHEMY_DATABASE_URL=' "$ENV_FILE" | tail -n1 | cut -d'=' -f2- | tr -d "\"'" | xargs)
+  if [ -n "$DB_URL" ]; then
+    read DB_USER DB_PASS DB_HOST DB_PORT DB_NAME < <(parse_db_url "$DB_URL")
+    : "${DB_USER:=pasarguard}"
+    : "${DB_NAME:=pasarguard}"
+    : "${DB_PORT:=5432}"
+
+    echo "Backing up PostgreSQL database..."
+    mkdir -p "$OUTPUT_DIR/Pasarguard-DB"
+    PGPASSWORD="$DB_PASS" pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -F c "$DB_NAME" \
+      > "$OUTPUT_DIR/Pasarguard-DB/pasarguard_backup.dump" 2>/dev/null \
+      && echo "PostgreSQL backup created." || echo "PostgreSQL backup failed."
+  else
+    echo "SQLALCHEMY_DATABASE_URL not found in .env"
+  fi
 else
-    echo ".env not found for Pasarguard"
+  echo ".env not found for Pasarguard"
 fi
 EOF
 )
-        ;;
-      *)
-        warn "Database: unknown/unsupported. Skipping DB dump."
-        DB_BACKUP_SCRIPT=""
-        DB_ENABLED=0
-        ;;
-    esac
+      ;;
 
-    cat > "$TRANSFER_SCRIPT" <<EOF
+    *)
+      warn "Database: unknown/unsupported. Skipping DB dump."
+      DB_BACKUP_SCRIPT=""
+      DB_ENABLED=0
+      ;;
+  esac
+
+  cat > "$TRANSFER_SCRIPT" <<EOF
 #!/bin/bash
 echo "Starting transfer backup ($PANEL_NAME)..."
 echo "Date: \$(date '+%Y-%m-%d %H:%M:%S')"
 echo "----------------------------------------"
+
+PANEL_NAME="$PANEL_NAME"
+DB_TYPE="$DB_TYPE"
+DB_TYPE=\$(echo "\$DB_TYPE" | tr '[:upper:]' '[:lower:]')
 
 BACKUP_DIR="$BACKUP_DIR"
 REMOTE_IP="$REMOTE_IP"
@@ -1658,100 +1660,196 @@ REMOTE_PAS="$REMOTE_PAS"
 REMOTE_PG_NODE="$REMOTE_PG_NODE"
 REMOTE_LIB_PAS="$REMOTE_LIB_PAS"
 REMOTE_LIB_PG="$REMOTE_LIB_PG"
+REMOTE_LIB_MYSQL="$REMOTE_LIB_MYSQL"
+REMOTE_LIB_PGSQL="$REMOTE_LIB_PGSQL"
 REMOTE_DB="$REMOTE_DB"
 DB_ENABLED="$DB_ENABLED"
 DB_DIR_NAME="$DB_DIR_NAME"
 BACKUP_CLIENT_DB="$BACKUP_CLIENT_DB"
 
+# --- Normalize BACKUP_CLIENT_DB (y/yes => Y, anything else => N) ---
+BACKUP_CLIENT_DB=\$(echo "\${BACKUP_CLIENT_DB:-N}" | tr -d '[:space:]\\r' | tr '[:lower:]' '[:upper:]')
+[ "\$BACKUP_CLIENT_DB" = "YES" ] && BACKUP_CLIENT_DB="Y"
+[ "\$BACKUP_CLIENT_DB" = "NO" ] && BACKUP_CLIENT_DB="N"
+[ "\$BACKUP_CLIENT_DB" = "Y" ] || BACKUP_CLIENT_DB="N"
+# ---------------------------------------------------------------
+             
+DO_DB_DUMP_TRANSFER="0"
+if [ "\$DB_ENABLED" = "1" ] && [ "\$BACKUP_CLIENT_DB" = "Y" ]; then
+  DO_DB_DUMP_TRANSFER="1"
+fi
+
+DO_MYSQL_DIR_TRANSFER="0"
+case "\$DB_TYPE" in
+  mysql|mariadb) DO_MYSQL_DIR_TRANSFER="1" ;;
+esac
+
+DO_PGSQL_DIR_TRANSFER="0"
+case "\$DB_TYPE" in
+  postgresql) DO_PGSQL_DIR_TRANSFER="1" ;;
+esac
+
+
 DATE=\$(date +"%Y-%m-%d_%H-%M-%S")
 OUTPUT_DIR="\$BACKUP_DIR/backup_\$DATE"
-
 mkdir -p "\$OUTPUT_DIR"
 
 echo "Copying local folders..."
-rsync -a /opt/pasarguard/ "\$OUTPUT_DIR/opt_pasarguard/" 2>/dev/null
-rsync -a /opt/pg-node/ "\$OUTPUT_DIR/opt_pg_node/" 2>/dev/null
-rsync -a /var/lib/pasarguard/ "\$OUTPUT_DIR/var_lib_pasarguard/" 2>/dev/null
-rsync -a /var/lib/pg-node/ "\$OUTPUT_DIR/var_lib_pg_node/" 2>/dev/null
+rsync -a /opt/pasarguard/     "\$OUTPUT_DIR/opt_pasarguard/"
+rsync -a /opt/pg-node/        "\$OUTPUT_DIR/opt_pg_node/"
+rsync -a /var/lib/pasarguard/ "\$OUTPUT_DIR/var_lib_pasarguard/"
+rsync -a /var/lib/pg-node/    "\$OUTPUT_DIR/var_lib_pg_node/"
 
-$DB_BACKUP_SCRIPT
+if [ "\$DO_PGSQL_DIR_TRANSFER" = "1" ] && [ -d "/var/lib/postgresql" ]; then
+  rsync -a /var/lib/postgresql/ "\$OUTPUT_DIR/var_lib_postgresql/"
+else
+  echo "PostgreSQL data dir copy on Source: Skipped (DB is not PostgreSQL or dir missing)"
+fi
+
+if [ "\$DO_DB_DUMP_TRANSFER" = "1" ]; then
+  echo "Creating DB dump on Source..."
+EOF
+
+  printf '%s\n' "$DB_BACKUP_SCRIPT" >> "$TRANSFER_SCRIPT"
+
+  cat >> "$TRANSFER_SCRIPT" <<'EOF'
+else
+  echo "DB dump on Source: Skipped (user chose N)"
+fi
 
 echo "Installing sshpass if needed..."
-command -v sshpass &>/dev/null || apt update && apt install -y sshpass
+command -v sshpass &>/dev/null || { apt update && apt install -y sshpass; }
 
-echo "Cleaning remote server..."
 
-SSH_ERR_FILE=\$(mktemp)
+echo "Cleaning remote server (delete then replace)..."
+SSH_ERR_FILE=$(mktemp)
 
-sshpass -p "\$REMOTE_PASS" ssh \
+REMOTE_CMD="set -e;
+echo 'Removing old data...';
+rm -rf '$REMOTE_PAS' '$REMOTE_PG_NODE' '$REMOTE_LIB_PAS' '$REMOTE_LIB_PG';
+mkdir -p '$REMOTE_PAS' '$REMOTE_PG_NODE' '$REMOTE_LIB_PAS' '$REMOTE_LIB_PG';"
+
+if [ "$DO_DB_DUMP_TRANSFER" = "1" ]; then
+  REMOTE_CMD="$REMOTE_CMD
+rm -rf '$REMOTE_DB';
+mkdir -p '$REMOTE_DB';"
+fi
+
+if [ "$DO_MYSQL_DIR_TRANSFER" = "1" ]; then
+  REMOTE_CMD="$REMOTE_CMD
+rm -rf '$REMOTE_LIB_MYSQL';
+mkdir -p '$REMOTE_LIB_MYSQL';"
+fi
+
+if [ "$DO_PGSQL_DIR_TRANSFER" = "1" ]; then
+  REMOTE_CMD="$REMOTE_CMD
+rm -rf '$REMOTE_LIB_PGSQL';
+mkdir -p '$REMOTE_LIB_PGSQL';"
+fi
+
+sshpass -p "$REMOTE_PASS" ssh \
   -o StrictHostKeyChecking=no \
   -o ConnectTimeout=10 \
-  "\$REMOTE_USER@\${REMOTE_IP}" "
-    echo 'Removing old data...'
-    rm -rf '\$REMOTE_PAS' '\$REMOTE_PG_NODE' '\$REMOTE_LIB_PAS' '\$REMOTE_LIB_PG'
-    mkdir -p '\$REMOTE_PAS' '\$REMOTE_PG_NODE' '\$REMOTE_LIB_PAS' '\$REMOTE_LIB_PG'
-    if [ \"\$DB_ENABLED\" = \"1\" ]; then
-        rm -rf '\$REMOTE_DB'
-        mkdir -p '\$REMOTE_DB'
-    fi
-" 2>\"\$SSH_ERR_FILE\"
-SSH_RC=\$?
+  "$REMOTE_USER@${REMOTE_IP}" "$REMOTE_CMD" 2>"$SSH_ERR_FILE"
+SSH_RC=$?
 
-if [ \"\$SSH_RC\" -ne 0 ]; then
-  NOW=\$(date '+%Y-%m-%d %H:%M:%S')
-  DEST=\"\${REMOTE_USER}@\${REMOTE_IP}\"
+NOW=$(date '+%Y-%m-%d %H:%M:%S')
+DEST="${REMOTE_USER}@${REMOTE_IP}"
 
-  if [ \"\$DB_ENABLED\" = \"1\" ]; then
-    DB_TEXT=\"Enabled (\$DB_TYPE)\"
-  else
-    DB_TEXT=\"Disabled (SQLite/files)\"
-  fi
+if [ "$DB_ENABLED" = "1" ]; then
+  DB_TEXT="Enabled ($DB_TYPE)"
+else
+  DB_TEXT="Disabled (SQLite/files)"
+fi
 
-  ERR_LAST=\$(tail -n 3 \"\$SSH_ERR_FILE\" | tr -d '\r' | sed 's/[[:space:]]\\+/ /g')
+if [ "$SSH_RC" -ne 0 ]; then
+  ERR_LAST=$(tail -n 3 "$SSH_ERR_FILE" | tr -d '\r' | sed 's/[[:space:]]\+/ /g')
 
   echo
-  echo \"❌ Transfer Report — Pasarguard\"
-  echo \"────────────────────────────────────────\"
-  echo \"➜ Destination : \$DEST\"
-  echo \"➜ Date        : \$NOW\"
-  echo \"➜ Database    : \$DB_TEXT\"
-  echo \"➜ Restart     : Not attempted\"
-  echo \"────────────────────────────────────────\"
-  echo \"⚠️ Connection Error\"
-  echo \" • Step      : SSH connect / clean remote\"
-  echo \" • Exit code : \$SSH_RC\"
-  [ -n \"\$ERR_LAST\" ] && echo \" • Details   : \$ERR_LAST\"
-  echo \"────────────────────────────────────────\"
-  echo \"Tip: Check IP/User/Password, SSH port 22, firewall, and sshd status.\"
+  echo "❌ Transfer Report — $PANEL_NAME"
+  echo "────────────────────────────────────────"
+  echo "➜ Destination : $DEST"
+  echo "➜ Date        : $NOW"
+  echo "➜ Database    : $DB_TEXT"
+  echo "➜ DB dump xfer : $([ "$DO_DB_DUMP_TRANSFER" = "1" ] && echo Enabled || echo Skipped)"
+  echo "➜ Restart     : Not attempted"
+  echo "────────────────────────────────────────"
+  echo "⚠️ Connection/Cleanup Error"
+  echo " • Step      : SSH connect / clean remote"
+  echo " • Exit code : $SSH_RC"
+  [ -n "$ERR_LAST" ] && echo " • Details   : $ERR_LAST"
   echo
-
-  rm -f \"\$SSH_ERR_FILE\"
+  rm -f "$SSH_ERR_FILE"
   exit 1
 fi
 
-rm -f \"\$SSH_ERR_FILE\"
-echo \"Remote cleanup done.\"
+rm -f "$SSH_ERR_FILE"
+echo "Remote cleanup done."
 
-echo "Transferring data to \$REMOTE_IP..."
-sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/opt_pasarguard/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_PAS/" && echo "opt_pasarguard transferred"
-sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/opt_pg_node/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_PG_NODE/" && echo "opt_pg_node transferred"
-sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_pasarguard/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_LIB_PAS/" && echo "var_lib_pasarguard transferred"
-sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_pg_node/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_LIB_PG/" && echo "var_lib_pg_node transferred"
-if [ "\$DB_ENABLED" = "1" ] && [ -d "\$OUTPUT_DIR/\$DB_DIR_NAME" ]; then
-    sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/\$DB_DIR_NAME/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_DB/" && echo "Database transferred"
+echo "Transferring data to $REMOTE_IP..."
+sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/opt_pasarguard/"     "$REMOTE_USER@${REMOTE_IP}:$REMOTE_PAS/"      && echo "opt_pasarguard transferred"
+sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/opt_pg_node/"        "$REMOTE_USER@${REMOTE_IP}:$REMOTE_PG_NODE/"  && echo "opt_pg_node transferred"
+sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/var_lib_pasarguard/" "$REMOTE_USER@${REMOTE_IP}:$REMOTE_LIB_PAS/"  && echo "var_lib_pasarguard transferred"
+sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/var_lib_pg_node/"    "$REMOTE_USER@${REMOTE_IP}:$REMOTE_LIB_PG/"   && echo "var_lib_pg_node transferred"
+
+if [ "\$DO_MYSQL_DIR_TRANSFER" = "1" ] && [ -d "/var/lib/mysql/pasarguard" ]; then
+  rsync -a /var/lib/mysql/pasarguard/ "\$OUTPUT_DIR/var_lib_mysql_pasarguard/"
+else
+  echo "MySQL data dir copy on Source: Skipped (DB is not MySQL/MariaDB or dir missing)"
 fi
-echo "Restarting Pasarguard on remote..."
-sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\${REMOTE_IP}" "pasarguard restart" && echo "Restart successful" || echo "Restart failed"
+
+if [ "$DO_PGSQL_DIR_TRANSFER" = "1" ] && [ -d "$OUTPUT_DIR/var_lib_postgresql" ]; then
+  sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/var_lib_postgresql/" \
+    "$REMOTE_USER@${REMOTE_IP}:$REMOTE_LIB_PGSQL/" && echo "var_lib_postgresql transferred"
+else
+  echo "PostgreSQL data dir transfer: Skipped"
+fi
+
+if [ "$DO_DB_DUMP_TRANSFER" = "1" ] && [ -d "$OUTPUT_DIR/$DB_DIR_NAME" ]; then
+  sshpass -p "$REMOTE_PASS" rsync -a "$OUTPUT_DIR/$DB_DIR_NAME/" "$REMOTE_USER@${REMOTE_IP}:$REMOTE_DB/" && echo "Database dump transferred"
+else
+  echo "Database dump transfer: Skipped"
+fi
+
+echo "Restarting Pasarguard on remote (detached)..."
+sshpass -p "$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "$REMOTE_USER@${REMOTE_IP}" \
+  "nohup pasarguard restart >/tmp/pasarguard_restart.log 2>&1 < /dev/null & disown; echo RESTART_TRIGGERED"
+RESTART_RC=$?
+
+RESTART_TEXT="Failed"
+[ "$RESTART_RC" -eq 0 ] && RESTART_TEXT="Triggered"
+
+echo
+echo "✅ Transfer Report — $PANEL_NAME"
+echo "────────────────────────────────────────"
+echo "➜ Destination : $DEST"
+echo "➜ Date        : $NOW"
+echo "➜ Database    : $DB_TEXT"
+echo "➜ DB dump xfer : $([ "$DO_DB_DUMP_TRANSFER" = "1" ] && echo Enabled || echo Skipped)"
+echo "➜ Restart     : $RESTART_TEXT"
+echo "────────────────────────────────────────"
+echo "📁 Paths"
+echo " • /opt/pasarguard                   → $REMOTE_PAS"
+echo " • /opt/pg-node                      → $REMOTE_PG_NODE"
+echo " • /var/lib/pasarguard               → $REMOTE_LIB_PAS"
+echo " • /var/lib/pg-node                  → $REMOTE_LIB_PG"
+if [ "$DO_MYSQL_DIR_TRANSFER" = "1" ]; then
+  echo " • /var/lib/mysql/pasarguard         → $REMOTE_LIB_MYSQL"
+fi
+
+if [ "$DO_PGSQL_DIR_TRANSFER" = "1" ]; then
+  echo " • /var/lib/postgresql              → $REMOTE_LIB_PGSQL"
+fi
+if [ "$DO_DB_DUMP_TRANSFER" = "1" ]; then
+  echo " • DB dump folder                    → $REMOTE_DB"
+fi
+echo
 
 echo "Cleaning local backup..."
-rm -rf "\$BACKUP_DIR"
-
-echo "========================================"
-echo "       TRANSFER COMPLETED!"
-echo "       Date: \$(date '+%Y-%m-%d %H:%M:%S')"
-echo "========================================"
+rm -rf "$BACKUP_DIR"
 EOF
 
+         #X-UI#
   elif [[ "$PANEL_TYPE" == "X-ui" ]]; then
     PANEL_NAME="X-ui"
     BACKUP_DIR="/root/backuper_X-ui"
