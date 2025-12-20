@@ -1238,7 +1238,11 @@ echo "Copying local folders..."
 cp -r /etc/opt/marzneshin/ "\$OUTPUT_DIR/etc_opt/" 2>/dev/null
 cp -r /var/lib/marznode/ "\$OUTPUT_DIR/var_lib_marznode/" 2>/dev/null
 rsync -a /var/lib/marzneshin/ "\$OUTPUT_DIR/var_lib_marzneshin/" 2>/dev/null
-rsync -a /var/lib/marzneshin/mysql/ "\$OUTPUT_DIR/var_lib_marzneshin_mysql/" 2>/dev/null
+if [ "\$DB_TYPE" != "sqlite" ]; then
+  rsync -a /var/lib/marzneshin/mysql/ "\$OUTPUT_DIR/var_lib_marzneshin_mysql/" 2>/dev/null
+else
+  echo "SQLite detected: skip copying /var/lib/marzneshin/mysql"
+fi
 
 if [ "\$DO_DB_DUMP_TRANSFER" = "1" ]; then
   echo "Creating DB dump on Source..."
@@ -1310,7 +1314,11 @@ echo "Transferring data to \$REMOTE_IP..."
 sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/etc_opt/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_ETC/" && echo "etc_opt transferred"
 sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marznode/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_NODE/" && echo "var_lib_marznode transferred"
 sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marzneshin/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_MARZ/" && echo "var_lib_marzneshin transferred"
-sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marzneshin_mysql/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_MARZ/mysql/" && echo "mysql subdir transferred"
+if [ "\$DB_TYPE" != "sqlite" ] && [ -d "\$OUTPUT_DIR/var_lib_marzneshin_mysql" ]; then
+  sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marzneshin_mysql/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_MARZ/mysql/" && echo "mysql subdir transferred"
+else
+  echo "mysql subdir transfer: Skipped (SQLite)"
+fi
 
 if [ "\$DO_DB_DUMP_TRANSFER" = "1" ] && [ -d "\$OUTPUT_DIR/\$DB_DIR_NAME" ]; then
   sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/\$DB_DIR_NAME/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_DB/" && echo "Database dump transferred"
@@ -1348,7 +1356,9 @@ echo "📁 Paths"
 echo " • /etc/opt/marzneshin        → \$REMOTE_ETC"
 echo " • /var/lib/marznode          → \$REMOTE_NODE"
 echo " • /var/lib/marzneshin        → \$REMOTE_MARZ"
-echo " • /var/lib/marzneshin/mysql  → \$REMOTE_MARZ/mysql"
+if [ "\$DB_TYPE" != "sqlite" ]; then
+  echo " • /var/lib/marzneshin/mysql  → \$REMOTE_MARZ/mysql"
+fi
 if [ "\$DO_DB_DUMP_TRANSFER" = "1" ]; then
   echo " • DB dump folder             → \$REMOTE_DB"
 fi
