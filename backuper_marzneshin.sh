@@ -1408,7 +1408,7 @@ echo "Cleaning local backup..."
 rm -rf "\$BACKUP_DIR"
 EOF
   
-     #Marzaban Transfor#
+#Marzaban Transfor#
   elif [[ "$PANEL_TYPE" == "Marzban" ]]; then
     PANEL_NAME="Marzban"
     BACKUP_DIR="/root/backuper_marzban"
@@ -1456,6 +1456,9 @@ echo "Starting transfer backup ($PANEL_NAME)..."
 echo "Date: \$(date '+%Y-%m-%d %H:%M:%S')"
 echo "----------------------------------------"
 
+PANEL_NAME="$PANEL_NAME"
+DB_TYPE="$DB_TYPE"
+
 BACKUP_DIR="$BACKUP_DIR"
 REMOTE_IP="$REMOTE_IP"
 REMOTE_USER="$REMOTE_USER"
@@ -1467,22 +1470,37 @@ DB_ENABLED="$DB_ENABLED"
 DB_DIR_NAME="$DB_DIR_NAME"
 BACKUP_CLIENT_DB="$BACKUP_CLIENT_DB"
 
+# --- Normalize BACKUP_CLIENT_DB (y/yes => Y, anything else => N) ---
+BACKUP_CLIENT_DB=\$(echo "\${BACKUP_CLIENT_DB:-N}" | tr -d '[:space:]\\r' | tr '[:lower:]' '[:upper:]')
+[ "\$BACKUP_CLIENT_DB" = "YES" ] && BACKUP_CLIENT_DB="Y"
+[ "\$BACKUP_CLIENT_DB" = "NO" ] && BACKUP_CLIENT_DB="N"
+[ "\$BACKUP_CLIENT_DB" = "Y" ] || BACKUP_CLIENT_DB="N"
+# ---------------------------------------------------------------
+
+DO_DB_DUMP_TRANSFER="0"
+if [ "\$DB_ENABLED" = "1" ] && [ "\$BACKUP_CLIENT_DB" = "Y" ]; then
+  DO_DB_DUMP_TRANSFER="1"
+fi
+
 DATE=\$(date +"%Y-%m-%d_%H-%M-%S")
 OUTPUT_DIR="\$BACKUP_DIR/backup_\$DATE"
-
 mkdir -p "\$OUTPUT_DIR"
 
 echo "Copying local folders..."
 rsync -a /opt/marzban/ "\$OUTPUT_DIR/opt_marzban/" 2>/dev/null
 rsync -a /var/lib/marzban/ "\$OUTPUT_DIR/var_lib_marzban/" 2>/dev/null
 
+if [ "\$DO_DB_DUMP_TRANSFER" = "1" ]; then
+  echo "Creating DB dump on Source..."
 $DB_BACKUP_SCRIPT
+else
+  echo "DB dump on Source: Skipped"
+fi
 
 echo "Installing sshpass if needed..."
-command -v sshpass &>/dev/null || apt update && apt install -y sshpass
+command -v sshpass &>/dev/null || { apt update && apt install -y sshpass; }
 
 echo "Cleaning remote server..."
-
 SSH_ERR_FILE=\$(mktemp)
 
 sshpass -p "\$REMOTE_PASS" ssh \
@@ -1492,65 +1510,95 @@ sshpass -p "\$REMOTE_PASS" ssh \
     echo 'Removing old data...'
     rm -rf '\$REMOTE_OPT' '\$REMOTE_LIB'
     mkdir -p '\$REMOTE_OPT' '\$REMOTE_LIB'
-    if [ \"\$DB_ENABLED\" = \"1\" ]; then
-        rm -rf '\$REMOTE_DB'
-        mkdir -p '\$REMOTE_DB'
+
+    if [ '\$DO_DB_DUMP_TRANSFER' = '1' ]; then
+      rm -rf '\$REMOTE_DB'
+      mkdir -p '\$REMOTE_DB'
     fi
-" 2>\"\$SSH_ERR_FILE\"
+" 2>"\$SSH_ERR_FILE"
 SSH_RC=\$?
 
-if [ \"\$SSH_RC\" -ne 0 ]; then
+if [ "\$SSH_RC" -ne 0 ]; then
   NOW=\$(date '+%Y-%m-%d %H:%M:%S')
-  DEST=\"\${REMOTE_USER}@\${REMOTE_IP}\"
+  DEST="\${REMOTE_USER}@\${REMOTE_IP}"
+  ERR_LAST=\$(tail -n 3 "\$SSH_ERR_FILE" | tr -d '\r' | sed 's/[[:space:]]\\+/ /g')
 
-  if [ \"\$DB_ENABLED\" = \"1\" ]; then
-    DB_TEXT=\"Enabled (\$DB_TYPE)\"
+  if [ "\$DB_ENABLED" = "1" ]; then
+    DB_TEXT="Enabled (\$DB_TYPE)"
   else
-    DB_TEXT=\"Disabled (SQLite/files)\"
+    DB_TEXT="Disabled (SQLite/files)"
   fi
 
-  ERR_LAST=\$(tail -n 3 \"\$SSH_ERR_FILE\" | tr -d '\r' | sed 's/[[:space:]]\\+/ /g')
-
   echo
-  echo \"❌ Transfer Report — Marzban\"
-  echo \"────────────────────────────────────────\"
-  echo \"➜ Destination : \$DEST\"
-  echo \"➜ Date        : \$NOW\"
-  echo \"➜ Database    : \$DB_TEXT\"
-  echo \"➜ Restart     : Not attempted\"
-  echo \"────────────────────────────────────────\"
-  echo \"⚠️ Connection Error\"
-  echo \" • Step      : SSH connect / clean remote\"
-  echo \" • Exit code : \$SSH_RC\"
-  [ -n \"\$ERR_LAST\" ] && echo \" • Details   : \$ERR_LAST\"
-  echo \"────────────────────────────────────────\"
-  echo \"Tip: Check IP/User/Password, SSH port 22, firewall, and sshd status.\"
+  echo "❌ Transfer Report — \$PANEL_NAME"
+  echo "────────────────────────────────────────"
+  echo "➜ Destination : \$DEST"
+  echo "➜ Date        : \$NOW"
+  echo "➜ Database    : \$DB_TEXT"
+  echo "➜ DB dump xfer : \$([ "\$DO_DB_DUMP_TRANSFER" = "1" ] && echo Enabled || echo Skipped)"
+  echo "➜ Restart     : Not attempted"
+  echo "────────────────────────────────────────"
+  echo "⚠️ Connection Error"
+  echo " • Step      : SSH connect / clean remote"
+  echo " • Exit code : \$SSH_RC"
+  [ -n "\$ERR_LAST" ] && echo " • Details   : \$ERR_LAST"
+  echo "────────────────────────────────────────"
+  echo "Tip: Check IP/User/Password, SSH port 22, firewall, and sshd status."
   echo
 
-  rm -f \"\$SSH_ERR_FILE\"
+  rm -f "\$SSH_ERR_FILE"
   exit 1
 fi
 
-rm -f \"\$SSH_ERR_FILE\"
-echo \"Remote cleanup done.\"
+rm -f "\$SSH_ERR_FILE"
+echo "Remote cleanup done."
 
 echo "Transferring data to \$REMOTE_IP..."
 sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/opt_marzban/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_OPT/" && echo "opt_marzban transferred"
 sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/var_lib_marzban/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_LIB/" && echo "var_lib_marzban transferred"
-if [ "\$DB_ENABLED" = "1" ] && [ -d "\$OUTPUT_DIR/\$DB_DIR_NAME" ]; then
-    sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/\$DB_DIR_NAME/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_DB/" && echo "Database transferred"
+
+if [ "\$DO_DB_DUMP_TRANSFER" = "1" ] && [ -d "\$OUTPUT_DIR/\$DB_DIR_NAME" ]; then
+  sshpass -p "\$REMOTE_PASS" rsync -a "\$OUTPUT_DIR/\$DB_DIR_NAME/" "\$REMOTE_USER@\${REMOTE_IP}:\$REMOTE_DB/" && echo "Database dump transferred"
+else
+  echo "Database dump transfer: Skipped"
 fi
 
-echo "Restarting Marzban on remote..."
-sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\${REMOTE_IP}" "marzban restart" && echo "Restart successful" || echo "Restart failed"
+echo "Restarting Marzban on remote (detached)..."
+sshpass -p "\$REMOTE_PASS" ssh -o StrictHostKeyChecking=no "\$REMOTE_USER@\${REMOTE_IP}" \
+  "nohup marzban restart >/tmp/marzban_restart.log 2>&1 < /dev/null & disown; echo RESTART_TRIGGERED"
+RESTART_RC=\$?
+
+NOW=\$(date '+%Y-%m-%d %H:%M:%S')
+DEST="\${REMOTE_USER}@\${REMOTE_IP}"
+
+if [ "\$DB_ENABLED" = "1" ]; then
+  DB_TEXT="Enabled (\$DB_TYPE)"
+else
+  DB_TEXT="Disabled (SQLite/files)"
+fi
+
+RESTART_TEXT="Failed"
+[ "\$RESTART_RC" -eq 0 ] && RESTART_TEXT="Triggered"
+
+echo
+echo "✅ Transfer Report — \$PANEL_NAME"
+echo "────────────────────────────────────────"
+echo "➜ Destination : \$DEST"
+echo "➜ Date        : \$NOW"
+echo "➜ Database    : \$DB_TEXT"
+echo "➜ DB dump xfer : \$([ "\$DO_DB_DUMP_TRANSFER" = "1" ] && echo Enabled || echo Skipped)"
+echo "➜ Restart     : \$RESTART_TEXT"
+echo "────────────────────────────────────────"
+echo "📁 Paths"
+echo " • /opt/marzban          → \$REMOTE_OPT"
+echo " • /var/lib/marzban      → \$REMOTE_LIB"
+if [ "\$DO_DB_DUMP_TRANSFER" = "1" ]; then
+  echo " • DB dump folder        → \$REMOTE_DB"
+fi
+echo
 
 echo "Cleaning local backup..."
 rm -rf "\$BACKUP_DIR"
-
-echo "========================================"
-echo "       TRANSFER COMPLETED!"
-echo "       Date: \$(date '+%Y-%m-%d %H:%M:%S')"
-echo "========================================"
 EOF
 
 ##Pasarguard##
