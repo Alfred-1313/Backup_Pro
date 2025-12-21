@@ -123,6 +123,9 @@ X-ui
 
 /root/marzban_backup.sh
 
+
+- 🇺🇸 English: [README.en.md](./README.en.md)
+
 /root/pasarguard_backup.sh
 
 /root/x-ui_backup.sh
