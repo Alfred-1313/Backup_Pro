@@ -759,6 +759,7 @@ if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
     SCRIPT_NAME=$(basename "$0")
     SERVER_IP=$(hostname -I | awk '{print $1}')
 REPORT_CAPTION=$(cat <<EOFCAP
+📌 <b>$CAPTION</b>
 
 ➖➖➖➖➖➖➖➖➖➖
 
